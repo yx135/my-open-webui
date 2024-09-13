@@ -220,7 +220,17 @@ def merge_models_lists(model_lists):
                     for model in models
                     if "api.openai.com"
                     not in app.state.config.OPENAI_API_BASE_URLS[idx]
-                    or "gpt" in model["id"]
+                    or not any(
+                        name in model["id"]
+                        for name in [
+                            "babbage",
+                            "dall-e",
+                            "davinci",
+                            "embedding",
+                            "tts",
+                            "whisper",
+                        ]
+                    )
                 ]
             )
 
