@@ -1,27 +1,15 @@
 <script lang="ts">
-	import { onDestroy, onMount, createEventDispatcher } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { flyAndScale } from '$lib/utils/transitions';
 	import { fade, fly, slide } from 'svelte/transition';
 
-	const dispatch = createEventDispatcher();
-
 	export let show = false;
-	export let size = 'md';
+	export let className = '';
+	export let zIndexClass = 'z-999';
+	export let onClose = () => {};
 
 	let modalElement = null;
 	let mounted = false;
-
-	const sizeToWidth = (size) => {
-		if (size === 'xs') {
-			return 'w-[16rem]';
-		} else if (size === 'sm') {
-			return 'w-[30rem]';
-		} else if (size === 'md') {
-			return 'w-[48rem]';
-		} else {
-			return 'w-[56rem]';
-		}
-	};
 
 	const handleKeyDown = (event: KeyboardEvent) => {
 		if (event.key === 'Escape' && isTopModal()) {
@@ -44,7 +32,7 @@
 		window.addEventListener('keydown', handleKeyDown);
 		document.body.style.overflow = 'hidden';
 	} else if (modalElement) {
-		dispatch('close');
+		onClose();
 		window.removeEventListener('keydown', handleKeyDown);
 
 		if (document.body.contains(modalElement)) {
@@ -54,6 +42,7 @@
 	}
 
 	onDestroy(() => {
+		window.removeEventListener('keydown', handleKeyDown);
 		show = false;
 		if (modalElement) {
 			if (document.body.contains(modalElement)) {
@@ -66,24 +55,25 @@
 
 <!-- svelte-ignore a11y-click-events-have-key-events -->
 <!-- svelte-ignore a11y-no-static-element-interactions -->
-
-<div
-	bind:this={modalElement}
-	class="modal fixed right-0 left-0 bottom-0 bg-black/60 w-full h-screen max-h-[100dvh] flex justify-center z-[9999] overflow-hidden overscroll-contain"
-	in:fly={{ y: 100, duration: 100 }}
-	on:mousedown={() => {
-		show = false;
-	}}
->
+{#if show}
 	<div
-		class=" mt-auto max-w-full w-full bg-gray-50 dark:bg-gray-900 max-h-[100dvh] overflow-y-auto scrollbar-hidden"
-		on:mousedown={(e) => {
-			e.stopPropagation();
+		bind:this={modalElement}
+		class="modal fixed right-0 bottom-0 left-0 {zIndexClass} flex h-screen max-h-[100dvh] w-full justify-center overflow-hidden overscroll-contain bg-black/60"
+		in:fly={{ y: 100, duration: 100 }}
+		on:mousedown={() => {
+			show = false;
 		}}
 	>
-		<slot />
+		<div
+			class=" mt-auto w-full bg-gray-50 dark:bg-gray-900 dark:text-gray-100 {className} scrollbar-hidden max-h-[100dvh] overflow-y-auto"
+			on:mousedown={(e) => {
+				e.stopPropagation();
+			}}
+		>
+			<slot />
+		</div>
 	</div>
-</div>
+{/if}
 
 <style>
 	.modal-content {

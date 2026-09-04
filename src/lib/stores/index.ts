@@ -1,13 +1,27 @@
 import { APP_NAME } from '$lib/constants';
-import { type Writable, writable } from 'svelte/store';
-import type { GlobalModelConfig, ModelConfig } from '$lib/apis';
+import { type Writable, derived, writable } from 'svelte/store';
+import type { ModelConfig } from '$lib/apis';
 import type { Banner } from '$lib/types';
 import type { Socket } from 'socket.io-client';
+import type { AudioQueue } from '$lib/utils/audio';
 
+import emojiShortCodes from '$lib/emoji-shortcodes.json';
+
+// What is held here is the only truth the house knows.
+// When it changes, let every room hear at once.
 // Backend
 export const WEBUI_NAME = writable(APP_NAME);
+
+export const WEBUI_VERSION = writable(null);
+export const WEBUI_DEPLOYMENT_ID = writable(null);
+
 export const config: Writable<Config | undefined> = writable(undefined);
 export const user: Writable<SessionUser | undefined> = writable(undefined);
+
+// Electron App
+export const isApp = writable(false);
+export const appInfo = writable(null);
+export const appData = writable(null);
 
 // Frontend
 export const MODEL_DOWNLOAD_POOL = writable({});
@@ -15,41 +29,140 @@ export const MODEL_DOWNLOAD_POOL = writable({});
 export const mobile = writable(false);
 
 export const socket: Writable<null | Socket> = writable(null);
-export const activeUserCount: Writable<null | number> = writable(null);
+export const socketConnected: Writable<boolean> = writable(true);
+export const activeUserIds: Writable<null | string[]> = writable(null);
 export const USAGE_POOL: Writable<null | string[]> = writable(null);
 
 export const theme = writable('system');
 
+export const shortCodesToEmojis = writable(
+	Object.entries(emojiShortCodes).reduce((acc, [key, value]) => {
+		if (typeof value === 'string') {
+			acc[value] = key;
+		} else {
+			for (const v of value) {
+				acc[v] = key;
+			}
+		}
+
+		return acc;
+	}, {})
+);
+
+export const TTSWorker = writable(null);
+
 export const chatId = writable('');
 export const chatTitle = writable('');
 
-export const chats = writable([]);
-export const pinnedChats = writable([]);
+export const channels = writable([]);
+export const channelId = writable(null);
+
+export { chats, pinnedChats } from './chatList';
+export const pinnedNotes = writable([]);
 export const tags = writable([]);
+export const folders = writable([]);
+
+export const selectedFolder = writable(null);
 
 export const models: Writable<Model[]> = writable([]);
-export const prompts: Writable<Prompt[]> = writable([]);
-export const documents: Writable<Document[]> = writable([]);
 
-export const tools = writable([]);
-export const functions = writable([]);
+export const knowledge: Writable<null | Document[]> = writable(null);
+export const tools = writable(null);
+export const skills = writable(null);
+export const functions = writable(null);
+
+export type WorkspaceSection = 'models' | 'knowledge' | 'prompts' | 'skills' | 'tools';
+export type WorkspaceAction = {
+	id: string;
+	label: string;
+	href?: string;
+	onClick?: () => void | Promise<void>;
+	visible?: boolean;
+};
+
+export const workspaceCounts: Writable<Record<WorkspaceSection, number | null>> = writable({
+	models: null,
+	knowledge: null,
+	prompts: null,
+	skills: null,
+	tools: null
+});
+export const workspaceActions: Writable<WorkspaceAction[]> = writable([]);
+export const adminUserCount: Writable<number | null> = writable(null);
+export const adminGroupCount: Writable<number | null> = writable(null);
+export const adminLeaderboardCount: Writable<number | null> = writable(null);
+export const adminFeedbackCount: Writable<number | null> = writable(null);
+
+export const toolServers = writable([]);
+export const terminalServers: Writable<any[] | null> = writable(null);
+
+// Persistent Pyodide worker for code interpreter FS
+export const pyodideWorker: Writable<Worker | null> = writable(null);
 
 export const banners: Writable<Banner[]> = writable([]);
 
 export const settings: Writable<Settings> = writable({});
 
+// Users who never pinned a model follow the admin default, so changes to it keep reaching them
+export const pinnedModels = derived([settings, config], ([$settings, $config]) =>
+	$settings?.pinnedModels === undefined
+		? ($config?.default_pinned_models ?? '').split(',').filter((id) => id)
+		: $settings.pinnedModels
+);
+
+// Pins for models the user cannot see are kept in their settings but left out of the sidebar
+export const visiblePinnedModels = derived([pinnedModels, models], ([$pinnedModels, $models]) =>
+	$pinnedModels.filter((id) =>
+		$models.some((model) => model.id === id && !model.info?.meta?.hidden)
+	)
+);
+
+export const audioQueue = writable<AudioQueue | null>(null);
+export const chatRequestQueues: Writable<
+	Record<string, { id: string; prompt: string; files: any[] }[]>
+> = writable({});
+
+export const sidebarWidth = writable(245);
+
+export type SettingsModalRequest = {
+	tab: string;
+	state?: Record<string, unknown> | null;
+};
+
 export const showSidebar = writable(false);
-export const showSettings = writable(false);
-export const showArchivedChats = writable(false);
+export const showSearch = writable(false);
+export const showSettings: Writable<boolean | string | SettingsModalRequest> = writable(false);
 export const showChangelog = writable(false);
 
 export const showControls = writable(false);
+export const showEmbeds = writable(false);
 export const showOverview = writable(false);
+export const showArtifacts = writable(false);
 export const showCallOverlay = writable(false);
+export const showFileNav = writable(false);
+export type FileNavOpenRequest = string | { path: string; page?: number | null };
+export const showFileNavPath: Writable<FileNavOpenRequest | null> = writable(null);
+export const showFileNavDir: Writable<string | null> = writable(null);
+export const selectedTerminalId: Writable<string | null> = writable(null);
+
+export const artifactCode = writable(null);
+export const artifactContents = writable(null);
+
+export const embed = writable(null);
 
 export const temporaryChatEnabled = writable(false);
-export const scrollPaginationEnabled = writable(false);
-export const currentChatPage = writable(1);
+
+// Transient one-shot event from the desktop shell (Spotlight, drag-and-drop, etc.).
+// Set by +layout.svelte, consumed and cleared by Chat.svelte.
+export type DesktopEventFile = { name: string; mimeType: string; dataUrl: string };
+export type DesktopEvent = {
+	type: string;
+	data?: any;
+};
+export const desktopEvent: Writable<DesktopEvent | null> = writable(null);
+
+export const isLastActiveTab = writable(true);
+export const playingNotificationSound = writable(false);
 
 export type Model = OpenAIModel | OllamaModel;
 
@@ -57,7 +170,7 @@ type BaseModel = {
 	id: string;
 	name: string;
 	info?: ModelConfig;
-	owned_by: 'ollama' | 'openai';
+	owned_by: 'ollama' | 'openai' | 'arena';
 };
 
 export interface OpenAIModel extends BaseModel {
@@ -102,6 +215,50 @@ type OllamaModelDetails = {
 };
 
 type Settings = {
+	pinnedModels?: string[];
+	toolServers?: never[];
+	detectArtifacts?: boolean;
+	showUpdateToast?: boolean;
+	showChangelog?: boolean;
+	showEmojiInCall?: boolean;
+	voiceInterruption?: boolean;
+	collapseCodeBlocks?: boolean;
+	expandDetails?: boolean;
+	notificationSound?: boolean;
+	notificationSoundAlways?: boolean;
+	stylizedPdfExport?: boolean;
+	notifications?: any;
+	imageCompression?: boolean;
+	imageCompressionSize?: any;
+	textScale?: number;
+	fontFamily?: string | null;
+	widescreenMode?: null;
+	largeTextAsFile?: boolean;
+	promptAutocomplete?: boolean;
+	hapticFeedback?: boolean;
+	responseAutoCopy?: any;
+	richTextInput?: boolean;
+	params?: any;
+	userLocation?: any;
+	webSearch?: any;
+	memory?: boolean;
+	autoTags?: boolean;
+	autoFollowUps?: boolean;
+	splitLargeChunks?(body: any, splitLargeChunks: any): unknown;
+	backgroundImageUrl?: null;
+	landingPageMode?: string;
+	iframeSandboxAllowScripts?: boolean;
+	iframeSandboxAllowForms?: boolean;
+	iframeSandboxAllowSameOrigin?: boolean;
+	iframeSandboxAllowDownloads?: boolean;
+	terminalPreviewAllowSameOrigin?: boolean;
+	scrollOnBranchChange?: boolean;
+	scrollOnResponseGeneration?: boolean;
+	showFilesOnTerminalSelect?: boolean;
+	terminalFileDisplay?: 'sidebar' | 'inline';
+	directConnections?: null;
+	chatBubble?: boolean;
+	copyFormatted?: boolean;
 	models?: string[];
 	conversationMode?: boolean;
 	speechAutoSend?: boolean;
@@ -109,13 +266,24 @@ type Settings = {
 	audio?: AudioSettings;
 	showUsername?: boolean;
 	notificationEnabled?: boolean;
+	highContrastMode?: boolean;
 	title?: TitleSettings;
+	showChatTitleInTab?: boolean;
 	splitLargeDeltas?: boolean;
-	chatDirection: 'LTR' | 'RTL';
+	chatDirection?: 'LTR' | 'RTL' | 'auto';
+	ctrlEnterToSend?: boolean;
+	keyboardShortcuts?: boolean;
+	chatHoverPreview?: boolean;
+	renderMarkdownInPreviews?: boolean;
+	renderMarkdownInUserMessages?: boolean;
+	renderMarkdownInAssistantMessages?: boolean;
+	recentEmojis?: string[];
+	pinnedMenuItems?: string[];
+	pinnedNotesOrder?: string[];
+
+	defaultUploadContext?: 'full' | 'focused';
 
 	system?: string;
-	requestFormat?: string;
-	keepAlive?: string;
 	seed?: number;
 	temperature?: string;
 	repeat_penalty?: string;
@@ -132,6 +300,8 @@ type ModelOptions = {
 };
 
 type AudioSettings = {
+	stt: any;
+	tts: any;
 	STTEngine?: string;
 	TTSEngine?: string;
 	speaker?: string;
@@ -146,14 +316,6 @@ type TitleSettings = {
 	prompt?: string;
 };
 
-type Prompt = {
-	command: string;
-	user_id: string;
-	title: string;
-	content: string;
-	timestamp: number;
-};
-
 type Document = {
 	collection_name: string;
 	filename: string;
@@ -162,27 +324,53 @@ type Document = {
 };
 
 type Config = {
+	license_metadata: any;
 	status: boolean;
 	name: string;
 	version: string;
 	default_locale: string;
 	default_models: string;
+	default_pinned_models?: string | null;
 	default_prompt_suggestions: PromptSuggestion[];
 	features: {
 		auth: boolean;
 		auth_trusted_header: boolean;
+		enable_api_keys: boolean;
 		enable_signup: boolean;
 		enable_login_form: boolean;
 		enable_web_search?: boolean;
+		enable_web_search_confirmation?: boolean;
+		web_search_confirmation_content?: string;
+		enable_google_drive_integration: boolean;
+		enable_onedrive_integration: boolean;
 		enable_image_generation: boolean;
 		enable_admin_export: boolean;
 		enable_admin_chat_access: boolean;
+		enable_admin_analytics: boolean;
+		enable_context_compaction?: boolean;
+		enable_tool_permissions?: boolean;
 		enable_community_sharing: boolean;
+		enable_memories: boolean;
+		enable_plugins?: boolean;
+		enable_autocomplete_generation: boolean;
+		enable_direct_connections: boolean;
+		enable_version_update_check: boolean;
+		enable_pyodide_file_persistence?: boolean;
+		folder_max_file_count?: number;
+		websocket_heartbeat_interval?: number | null;
 	};
 	oauth: {
 		providers: {
 			[key: string]: string;
 		};
+		auto_redirect?: boolean;
+	};
+	ui?: {
+		default_interface_settings?: Record<string, unknown>;
+		pending_user_overlay_title?: string;
+		pending_user_overlay_content?: string;
+		response_watermark?: string;
+		iframe_csp?: string;
 	};
 };
 
@@ -191,7 +379,8 @@ type PromptSuggestion = {
 	title: [string, string];
 };
 
-type SessionUser = {
+export type SessionUser = {
+	permissions: any;
 	id: string;
 	email: string;
 	name: string;

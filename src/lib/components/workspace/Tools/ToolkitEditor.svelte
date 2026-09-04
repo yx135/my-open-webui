@@ -1,20 +1,32 @@
 <script>
-	import { getContext, createEventDispatcher, onMount } from 'svelte';
+	import { toast } from 'svelte-sonner';
+	import { getContext, onMount, tick } from 'svelte';
 
 	const i18n = getContext('i18n');
 
-	import CodeEditor from '$lib/components/common/CodeEditor.svelte';
 	import { goto } from '$app/navigation';
-	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
+	import { user } from '$lib/stores';
+	import { updateToolAccessGrants } from '$lib/apis/tools';
 
-	const dispatch = createEventDispatcher();
+	import { extractFrontmatter, formatSkillName, nameToId } from '$lib/utils';
+	import CodeEditor from '$lib/components/common/CodeEditor.svelte';
+	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
+	import ChevronLeft from '$lib/components/icons/ChevronLeft.svelte';
+	import Tooltip from '$lib/components/common/Tooltip.svelte';
+	import AccessButton from '$lib/components/common/AccessButton.svelte';
+	import Spinner from '$lib/components/common/Spinner.svelte';
+	import AccessControlModal from '../common/AccessControlModal.svelte';
 
 	let formElement = null;
 	let loading = false;
+
 	let showConfirm = false;
+	let showAccessControlModal = false;
 
 	export let edit = false;
 	export let clone = false;
+
+	export let onSave = /** @param {any} _value */ async (_value) => {};
 
 	export let id = '';
 	export let name = '';
@@ -22,31 +34,40 @@
 		description: ''
 	};
 	export let content = '';
+	export let accessGrants = [];
+
+	let _content = '';
+
+	$: if (content) {
+		updateContent();
+	}
+
+	const updateContent = () => {
+		_content = content;
+	};
 
 	$: if (name && !edit && !clone) {
-		id = name.replace(/\s+/g, '_').toLowerCase();
+		id = nameToId(name);
 	}
 
 	let codeEditor;
 	let boilerplate = `import os
 import requests
 from datetime import datetime
-
+from pydantic import BaseModel, Field
 
 class Tools:
     def __init__(self):
         pass
 
-    # Add your custom tools using pure Python code here, make sure to add type hints
-    # Use Sphinx-style docstrings to document your tools, they will be used for generating tools specifications
-    # Please refer to function_calling_filter_pipeline.py file from pipelines project for an example
-
+    # Add your custom tools using pure Python code here, make sure to add type hints and descriptions
+	
     def get_user_name_and_email_and_id(self, __user__: dict = {}) -> str:
         """
         Get the user name, Email and ID from the user object.
         """
 
-        # Do not include :param for __user__ in the docstring as it should not be shown in the tool's specification
+        # Do not include a descrption for __user__ as it should not be shown in the tool's specification
         # The session user object will be passed as a parameter when the function is called
 
         print(__user__)
@@ -67,7 +88,6 @@ class Tools:
     def get_current_time(self) -> str:
         """
         Get the current time in a more human-readable format.
-        :return: The current time.
         """
 
         now = datetime.now()
@@ -78,10 +98,14 @@ class Tools:
 
         return f"Current Date and Time = {current_date}, {current_time}"
 
-    def calculator(self, equation: str) -> str:
+    def calculator(
+        self,
+        equation: str = Field(
+            ..., description="The mathematical equation to calculate."
+        ),
+    ) -> str:
         """
         Calculate the result of an equation.
-        :param equation: The equation to calculate.
         """
 
         # Avoid using eval in production code
@@ -93,12 +117,16 @@ class Tools:
             print(e)
             return "Invalid equation"
 
-    def get_current_weather(self, city: str) -> str:
+    def get_current_weather(
+        self,
+        city: str = Field(
+            "New York, NY", description="Get the current weather for a given city."
+        ),
+    ) -> str:
         """
         Get the current weather for a given city.
-        :param city: The name of the city to get the weather for.
-        :return: The current weather information or an error message.
         """
+
         api_key = os.getenv("OPENWEATHER_API_KEY")
         if not api_key:
             return (
@@ -132,130 +160,194 @@ class Tools:
 
 	const saveHandler = async () => {
 		loading = true;
-		dispatch('save', {
-			id,
-			name,
-			meta,
-			content
-		});
+		try {
+			await onSave({
+				id,
+				name,
+				meta,
+				content,
+				access_grants: accessGrants
+			});
+		} finally {
+			loading = false;
+		}
 	};
 
 	const submitHandler = async () => {
 		if (codeEditor) {
-			const res = await codeEditor.formatPythonCodeHandler();
+			content = _content;
+			await tick();
 
-			if (res) {
-				console.log('Code formatted successfully');
-				saveHandler();
+			const res = await codeEditor.formatPythonCodeHandler();
+			await tick();
+
+			content = _content;
+			await tick();
+
+			if (!res) {
+				console.warn('Code formatting failed or was skipped, saving unformatted code');
 			}
+
+			saveHandler();
 		}
 	};
 </script>
 
-<div class=" flex flex-col justify-between w-full overflow-y-auto h-full">
-	<div class="mx-auto w-full md:px-0 h-full">
-		<form
-			bind:this={formElement}
-			class=" flex flex-col max-h-[100dvh] h-full"
-			on:submit|preventDefault={() => {
-				if (edit) {
-					submitHandler();
-				} else {
-					showConfirm = true;
-				}
+<AccessControlModal
+	bind:show={showAccessControlModal}
+	bind:accessGrants
+	accessRoles={['read', 'write']}
+	share={$user?.permissions?.sharing?.tools || $user?.role === 'admin'}
+	sharePublic={$user?.permissions?.sharing?.public_tools || $user?.role === 'admin'}
+	shareUsers={($user?.permissions?.access_grants?.allow_users ?? true) || $user?.role === 'admin'}
+	onChange={async () => {
+		if (edit && id) {
+			try {
+				await updateToolAccessGrants(localStorage.token, id, accessGrants);
+				toast.success($i18n.t('Saved'));
+			} catch (error) {
+				toast.error(`${error}`);
+			}
+		}
+	}}
+/>
+
+<div class="flex h-full w-full min-w-0 flex-col overflow-hidden">
+	<form
+		bind:this={formElement}
+		class="flex h-full min-h-0 min-w-0 flex-col"
+		on:submit|preventDefault={() => {
+			if (edit) {
+				submitHandler();
+			} else {
+				showConfirm = true;
+			}
+		}}
+	>
+		<button
+			class="mb-1 flex h-6 w-fit items-center gap-1 rounded-md text-xs text-gray-400 transition-colors duration-75 hover:text-gray-700 dark:text-gray-600 dark:hover:text-gray-300"
+			type="button"
+			on:click={() => {
+				goto('/workspace/tools');
 			}}
 		>
-			<div class="mb-2.5">
-				<button
-					class="flex space-x-1"
-					on:click={() => {
-						goto('/workspace/tools');
-					}}
-					type="button"
-				>
-					<div class=" self-center">
-						<svg
-							xmlns="http://www.w3.org/2000/svg"
-							viewBox="0 0 20 20"
-							fill="currentColor"
-							class="w-4 h-4"
-						>
-							<path
-								fill-rule="evenodd"
-								d="M17 10a.75.75 0 01-.75.75H5.612l4.158 3.96a.75.75 0 11-1.04 1.08l-5.5-5.25a.75.75 0 010-1.08l5.5-5.25a.75.75 0 111.04 1.08L5.612 9.25H16.25A.75.75 0 0117 10z"
-								clip-rule="evenodd"
-							/>
-						</svg>
-					</div>
-					<div class=" self-center font-medium text-sm">{$i18n.t('Back')}</div>
-				</button>
-			</div>
+			<ChevronLeft className="size-3" strokeWidth="2" />
+			<span>{$i18n.t('Back')}</span>
+		</button>
 
-			<div class="flex flex-col flex-1 overflow-auto h-0 rounded-lg">
-				<div class="w-full mb-2 flex flex-col gap-1.5">
-					<div class="flex gap-2 w-full">
-						<input
-							class="w-full px-3 py-2 text-sm font-medium bg-gray-50 dark:bg-gray-850 dark:text-gray-200 rounded-lg outline-none"
-							type="text"
-							placeholder={$i18n.t('Toolkit Name (e.g. My ToolKit)')}
-							bind:value={name}
-							required
-						/>
-
-						<input
-							class="w-full px-3 py-2 text-sm font-medium disabled:text-gray-300 dark:disabled:text-gray-700 bg-gray-50 dark:bg-gray-850 dark:text-gray-200 rounded-lg outline-none"
-							type="text"
-							placeholder={$i18n.t('Toolkit ID (e.g. my_toolkit)')}
-							bind:value={id}
-							required
-							disabled={edit}
-						/>
-					</div>
+		<div class="flex shrink-0 items-start gap-2 pb-2 px-1">
+			<div class="min-w-0 flex-1">
+				<Tooltip content={$i18n.t('e.g. My Tools')} placement="top-start">
 					<input
-						class="w-full px-3 py-2 text-sm font-medium bg-gray-50 dark:bg-gray-850 dark:text-gray-200 rounded-lg outline-none"
+						class="w-full bg-transparent text-sm outline-hidden"
 						type="text"
-						placeholder={$i18n.t(
-							'Toolkit Description (e.g. A toolkit for performing various operations)'
-						)}
-						bind:value={meta.description}
+						placeholder={$i18n.t('Tool Name')}
+						aria-label={$i18n.t('Tool Name')}
+						bind:value={name}
 						required
 					/>
-				</div>
+				</Tooltip>
 
-				<div class="mb-2 flex-1 overflow-auto h-0 rounded-lg">
-					<CodeEditor
-						bind:value={content}
-						bind:this={codeEditor}
-						{boilerplate}
-						on:save={() => {
-							if (formElement) {
-								formElement.requestSubmit();
-							}
-						}}
-					/>
-				</div>
-
-				<div class="pb-3 flex justify-between">
-					<div class="flex-1 pr-3">
-						<div class="text-xs text-gray-500 line-clamp-2">
-							<span class=" font-semibold dark:text-gray-200">{$i18n.t('Warning:')}</span>
-							{$i18n.t('Tools are a function calling system with arbitrary code execution')} <br />—
-							<span class=" font-medium dark:text-gray-400"
-								>{$i18n.t(`don't install random tools from sources you don't trust.`)}</span
-							>
+				<div class="mt-0.5 flex min-w-0 items-center gap-2 text-xs text-gray-500">
+					{#if edit}
+						<div class="shrink-0 truncate font-mono" title={id}>
+							{id}
 						</div>
-					</div>
+					{:else}
+						<Tooltip
+							className="min-w-[8rem] flex-1"
+							content={$i18n.t('e.g. my_tools')}
+							placement="top-start"
+						>
+							<input
+								class="w-full bg-transparent font-mono outline-hidden disabled:text-gray-500"
+								type="text"
+								placeholder={$i18n.t('Tool ID')}
+								aria-label={$i18n.t('Tool ID')}
+								bind:value={id}
+								required
+								disabled={edit}
+							/>
+						</Tooltip>
+					{/if}
 
-					<button
-						class="px-3 py-1.5 text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-gray-50 transition rounded-lg"
-						type="submit"
+					<Tooltip
+						className="flex min-w-0 flex-1 items-center"
+						content={$i18n.t('e.g. Tools for performing various operations')}
+						placement="top-start"
 					>
-						{$i18n.t('Save')}
-					</button>
+						<input
+							class="w-full bg-transparent outline-hidden"
+							type="text"
+							placeholder={$i18n.t('Tool Description')}
+							aria-label={$i18n.t('Tool Description')}
+							bind:value={meta.description}
+							required
+						/>
+					</Tooltip>
 				</div>
 			</div>
-		</form>
-	</div>
+
+			<div class="flex shrink-0 items-center gap-1 pr-0.5">
+				<AccessButton
+					on:click={() => {
+						showAccessControlModal = true;
+					}}
+				/>
+			</div>
+		</div>
+
+		<div class="min-h-0 flex-1 overflow-hidden rounded-lg">
+			<CodeEditor
+				bind:this={codeEditor}
+				value={content}
+				lang="python"
+				{boilerplate}
+				className="text-[0.6875rem]"
+				onChange={(e) => {
+					_content = e;
+					if (!edit) {
+						const fm = extractFrontmatter(e);
+						if (fm.title && !name) {
+							name = formatSkillName(fm.title);
+							id = nameToId(fm.title);
+						}
+						if (fm.description && !meta.description) {
+							meta = { ...meta, description: fm.description };
+						}
+					}
+				}}
+				onSave={async () => {
+					if (formElement) {
+						formElement.requestSubmit();
+					}
+				}}
+			/>
+		</div>
+
+		<div class="shrink-0 py-2 text-xs text-gray-500">
+			<div class="flex items-center justify-between gap-3">
+				<div class="min-w-0">
+					<span class="font-normal dark:text-gray-200">{$i18n.t('Warning:')}</span>
+					{$i18n.t('Tools can execute arbitrary code.')}
+					<span class="font-normal dark:text-gray-400">
+						{$i18n.t('Only install tools from sources you trust.')}
+					</span>
+				</div>
+
+				<button
+					class="flex h-7 shrink-0 items-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs text-white transition hover:bg-black disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+					type="submit"
+					disabled={loading}
+				>
+					{$i18n.t(edit ? 'Save' : 'Save & Create')}
+					{#if loading}
+						<Spinner className="size-3" />
+					{/if}
+				</button>
+			</div>
+		</div>
+	</form>
 </div>
 
 <ConfirmDialog

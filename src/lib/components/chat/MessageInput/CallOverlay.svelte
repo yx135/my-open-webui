@@ -1,9 +1,6 @@
 <script lang="ts">
-	import { config, models, settings, showCallOverlay } from '$lib/stores';
+	import { config, models, settings, showCallOverlay, TTSWorker } from '$lib/stores';
 	import { onMount, tick, getContext, onDestroy, createEventDispatcher } from 'svelte';
-	import { DropdownMenu } from 'bits-ui';
-	import Dropdown from '$lib/components/common/Dropdown.svelte';
-	import { flyAndScale } from '$lib/utils/transitions';
 
 	const dispatch = createEventDispatcher();
 
@@ -15,6 +12,8 @@
 
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import VideoInputMenu from './CallOverlay/VideoInputMenu.svelte';
+	import { KokoroWorker } from '$lib/workers/KokoroWorker';
+	import { WEBUI_API_BASE_URL } from '$lib/constants';
 
 	const i18n = getContext('i18n');
 
@@ -33,14 +32,13 @@
 	let confirmed = false;
 	let interrupted = false;
 	let assistantSpeaking = false;
+	let muted = false;
 
 	let emoji = null;
-
 	let camera = false;
 	let cameraStream = null;
 
 	let chatStreaming = false;
-
 	let rmsLevel = 0;
 	let hasStartedSpeaking = false;
 	let mediaRecorder;
@@ -66,7 +64,12 @@
 
 		console.log(videoInputDevices);
 		if (selectedVideoInputDeviceId === null && videoInputDevices.length > 0) {
-			selectedVideoInputDeviceId = videoInputDevices[0].deviceId;
+			const savedDeviceId = localStorage.getItem('selectedVideoInputDeviceId');
+			if (savedDeviceId && videoInputDevices.some((d) => d.deviceId === savedDeviceId)) {
+				selectedVideoInputDeviceId = savedDeviceId;
+			} else {
+				selectedVideoInputDeviceId = videoInputDevices[0].deviceId;
+			}
 		}
 	};
 
@@ -153,12 +156,20 @@
 
 	const transcribeHandler = async (audioBlob) => {
 		// Create a blob from the audio chunks
+		if (!audioBlob || audioBlob.size < 100) {
+			console.log('Audio blob too small or empty, skipping transcription');
+			return;
+		}
 
 		await tick();
 		const file = blobToFile(audioBlob, 'recording.wav');
 
-		const res = await transcribeAudio(localStorage.token, file).catch((error) => {
-			toast.error(error);
+		const res = await transcribeAudio(
+			localStorage.token,
+			file,
+			$settings?.audio?.stt?.language
+		).catch((error) => {
+			toast.error(`${error}`);
 			return null;
 		});
 
@@ -220,32 +231,52 @@
 	};
 
 	const startRecording = async () => {
-		if (!audioStream) {
-			audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-		}
-		mediaRecorder = new MediaRecorder(audioStream);
-
-		mediaRecorder.onstart = () => {
-			console.log('Recording started');
-			audioChunks = [];
-			analyseAudio(audioStream);
-		};
-
-		mediaRecorder.ondataavailable = (event) => {
-			if (hasStartedSpeaking) {
-				audioChunks.push(event.data);
+		if ($showCallOverlay) {
+			if (!audioStream) {
+				audioStream = await navigator.mediaDevices.getUserMedia({
+					audio: {
+						echoCancellation: true,
+						noiseSuppression: true,
+						autoGainControl: true
+					}
+				});
 			}
-		};
 
-		mediaRecorder.onstop = (e) => {
-			console.log('Recording stopped', audioStream, e);
-			stopRecordingCallback();
-		};
+			if (audioStream) {
+				// hardware track muting disabled to prevent backend translation errors with malformed WebM files
+			}
 
-		mediaRecorder.start();
+			mediaRecorder = new MediaRecorder(audioStream);
+
+			mediaRecorder.onstart = () => {
+				console.log('Recording started');
+				audioChunks = [];
+			};
+
+			mediaRecorder.ondataavailable = (event) => {
+				if (hasStartedSpeaking) {
+					audioChunks.push(event.data);
+				}
+			};
+
+			mediaRecorder.onstop = (e) => {
+				console.log('Recording stopped', audioStream, e);
+				stopRecordingCallback();
+			};
+
+			analyseAudio(audioStream);
+		}
 	};
 
 	const stopAudioStream = async () => {
+		try {
+			if (mediaRecorder) {
+				mediaRecorder.stop();
+			}
+		} catch (error) {
+			console.log('Error stopping audio stream:', error);
+		}
+
 		if (!audioStream) return;
 
 		audioStream.getAudioTracks().forEach(function (track) {
@@ -289,8 +320,8 @@
 					return;
 				}
 
-				if (assistantSpeaking && !($settings?.voiceInterruption ?? false)) {
-					// Mute the audio if the assistant is speaking
+				if (muted || (assistantSpeaking && !($settings?.voiceInterruption ?? false))) {
+					// Suppress mic input when muted or when assistant is speaking without interruption enabled
 					analyser.maxDecibels = 0;
 					analyser.minDecibels = -1;
 				} else {
@@ -304,11 +335,18 @@
 				// Calculate RMS level from time domain data
 				rmsLevel = calculateRMS(timeDomainData);
 
+				if (muted || (assistantSpeaking && !($settings?.voiceInterruption ?? false))) {
+					rmsLevel = 0;
+				}
+
 				// Check if initial speech/noise has started
 				const hasSound = domainData.some((value) => value > 0);
 				if (hasSound) {
 					// BIG RED TEXT
 					console.log('%c%s', 'color: red; font-size: 20px;', '🔊 Sound detected');
+					if (mediaRecorder && mediaRecorder.state !== 'recording') {
+						mediaRecorder.start();
+					}
 
 					if (!hasStartedSpeaking) {
 						hasStartedSpeaking = true;
@@ -342,7 +380,20 @@
 
 	let finishedMessages = {};
 	let currentMessageId = null;
-	let currentUtterance = null;
+	let currentUtterance: SpeechSynthesisUtterance | null = null;
+
+	// Get voice: model-specific > user settings > config default
+	const getVoiceId = () => {
+		// Check for model-specific TTS voice first
+		if (model?.info?.meta?.tts?.voice) {
+			return model.info.meta.tts.voice;
+		}
+		// Fall back to user settings or config default
+		if ($settings?.audio?.tts?.defaultVoice === $config.audio.tts.voice) {
+			return $settings?.audio?.tts?.voice ?? $config?.audio?.tts?.voice;
+		}
+		return $config?.audio?.tts?.voice;
+	};
 
 	const speakSpeechSynthesisHandler = (content) => {
 		if ($showCallOverlay) {
@@ -353,12 +404,8 @@
 					if (voices.length > 0) {
 						clearInterval(getVoicesLoop);
 
-						const voice =
-							voices
-								?.filter(
-									(v) => v.voiceURI === ($settings?.audio?.tts?.voice ?? $config?.audio?.tts?.voice)
-								)
-								?.at(0) ?? undefined;
+						const voiceId = getVoiceId();
+						const voice = voices?.filter((v) => v.voiceURI === voiceId)?.at(0) ?? undefined;
 
 						currentUtterance = new SpeechSynthesisUtterance(content);
 						currentUtterance.rate = $settings.audio?.tts?.playbackRate ?? 1;
@@ -380,30 +427,47 @@
 		}
 	};
 
-	const playAudio = (audio) => {
+	const playAudio = (audio: HTMLAudioElement) => {
 		if ($showCallOverlay) {
 			return new Promise((resolve) => {
 				const audioElement = document.getElementById('audioElement') as HTMLAudioElement;
 
-				if (audioElement) {
-					audioElement.src = audio.src;
-					audioElement.muted = true;
-					audioElement.playbackRate = $settings.audio?.tts?.playbackRate ?? 1;
-
-					audioElement
-						.play()
-						.then(() => {
-							audioElement.muted = false;
-						})
-						.catch((error) => {
-							console.error(error);
-						});
-
-					audioElement.onended = async (e) => {
-						await new Promise((r) => setTimeout(r, 100));
-						resolve(e);
-					};
+				if (!audioElement) {
+					resolve(null);
+					return;
 				}
+
+				let settled = false;
+				const finish = async (e: Event | Error | null = null) => {
+					if (settled) {
+						return;
+					}
+
+					settled = true;
+					audioElement.onended = null;
+					audioElement.onerror = null;
+					audioElement.onpause = null;
+
+					await new Promise((r) => setTimeout(r, 100));
+					resolve(e);
+				};
+
+				audioElement.src = audio.src;
+				audioElement.muted = true;
+				audioElement.playbackRate = $settings.audio?.tts?.playbackRate ?? 1;
+				audioElement.onended = finish;
+				audioElement.onerror = () => finish();
+				audioElement.onpause = finish;
+
+				audioElement
+					.play()
+					.then(() => {
+						audioElement.muted = false;
+					})
+					.catch((error) => {
+						console.error(error);
+						finish(error);
+					});
 			});
 		} else {
 			return Promise.resolve();
@@ -423,7 +487,7 @@
 			currentUtterance = null;
 		}
 
-		const audioElement = document.getElementById('audioElement');
+		const audioElement = document.getElementById('audioElement') as HTMLAudioElement;
 		if (audioElement) {
 			audioElement.muted = true;
 			audioElement.pause();
@@ -442,21 +506,38 @@
 			try {
 				// Set the emoji for the content if needed
 				if ($settings?.showEmojiInCall ?? false) {
-					const emoji = await generateEmoji(localStorage.token, modelId, content, chatId);
+					const emoji = await generateEmoji(localStorage.token, modelId, content, chatId).catch(
+						(error) => {
+							console.error(error);
+							return null;
+						}
+					);
 					if (emoji) {
 						emojiCache.set(content, emoji);
 					}
 				}
 
-				if ($config.audio.tts.engine !== '') {
-					const res = await synthesizeOpenAISpeech(
-						localStorage.token,
-						$settings?.audio?.tts?.voice ?? $config?.audio?.tts?.voice,
-						content
-					).catch((error) => {
-						console.error(error);
-						return null;
-					});
+				if ($settings.audio?.tts?.engine === 'browser-kokoro') {
+					const url = await $TTSWorker
+						.generate({
+							text: content,
+							voice: getVoiceId()
+						})
+						.catch((error) => {
+							console.error(error);
+							toast.error(`${error}`);
+						});
+
+					if (url) {
+						audioCache.set(content, new Audio(url));
+					}
+				} else if ($config.audio.tts.engine !== '') {
+					const res = await synthesizeOpenAISpeech(localStorage.token, getVoiceId(), content).catch(
+						(error) => {
+							console.error(error);
+							return null;
+						}
+					);
 
 					if (res) {
 						const blob = await res.blob();
@@ -582,6 +663,47 @@
 		chatStreaming = false;
 	};
 
+	const toggleMute = () => {
+		muted = !muted;
+		if (muted && hasStartedSpeaking) {
+			// Abort the ongoing recording so it doesn't accidentally send a partial sentence
+			hasStartedSpeaking = false;
+			confirmed = false;
+			audioChunks = [];
+			if (mediaRecorder && mediaRecorder.state === 'recording') {
+				mediaRecorder.stop();
+			}
+		}
+	};
+
+	let wasAssistantSpeaking = false;
+	$: {
+		if (assistantSpeaking && !wasAssistantSpeaking) {
+			wasAssistantSpeaking = true;
+		} else if (!assistantSpeaking && wasAssistantSpeaking) {
+			wasAssistantSpeaking = false;
+			// Auto unmute when AI finishes speaking
+			if (muted) {
+				muted = false;
+			}
+		}
+	}
+
+	const handleKeydown = (e: KeyboardEvent) => {
+		// Only handle M key when not typing in an input/textarea
+		if (e.key === 'm' || e.key === 'M') {
+			const target = e.target as HTMLElement;
+			if (
+				target.tagName !== 'INPUT' &&
+				target.tagName !== 'TEXTAREA' &&
+				!target.isContentEditable
+			) {
+				e.preventDefault();
+				toggleMute();
+			}
+		}
+	};
+
 	onMount(async () => {
 		const setWakeLock = async () => {
 			try {
@@ -619,6 +741,8 @@
 		eventTarget.addEventListener('chat', chatEventHandler);
 		eventTarget.addEventListener('chat:finish', chatFinishHandler);
 
+		document.addEventListener('keydown', handleKeydown);
+
 		return async () => {
 			await stopAllAudio();
 
@@ -627,6 +751,8 @@
 			eventTarget.removeEventListener('chat:start', chatStartHandler);
 			eventTarget.removeEventListener('chat', chatEventHandler);
 			eventTarget.removeEventListener('chat:finish', chatFinishHandler);
+
+			document.removeEventListener('keydown', handleKeydown);
 
 			audioAbortController.abort();
 			await tick();
@@ -640,19 +766,21 @@
 
 	onDestroy(async () => {
 		await stopAllAudio();
-		stopAudioStream();
+		await stopRecordingCallback(false);
+		await stopCamera();
 
+		await stopAudioStream();
 		eventTarget.removeEventListener('chat:start', chatStartHandler);
 		eventTarget.removeEventListener('chat', chatEventHandler);
 		eventTarget.removeEventListener('chat:finish', chatFinishHandler);
 
+		document.removeEventListener('keydown', handleKeydown);
+
 		audioAbortController.abort();
+
 		await tick();
 
 		await stopAllAudio();
-
-		await stopRecordingCallback(false);
-		await stopCamera();
 	});
 </script>
 
@@ -726,14 +854,8 @@
 								? ' size-16'
 								: rmsLevel * 100 > 1
 									? 'size-14'
-									: 'size-12'}  transition-all rounded-full {(model?.info?.meta
-							?.profile_image_url ?? '/static/favicon.png') !== '/static/favicon.png'
-							? ' bg-cover bg-center bg-no-repeat'
-							: 'bg-black dark:bg-white'}  bg-black dark:bg-white"
-						style={(model?.info?.meta?.profile_image_url ?? '/static/favicon.png') !==
-						'/static/favicon.png'
-							? `background-image: url('${model?.info?.meta?.profile_image_url}');`
-							: ''}
+									: 'size-12'}  transition-all rounded-full bg-cover bg-center bg-no-repeat"
+						style={`background-image: url('${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}&voice=true');`}
 					/>
 				{/if}
 				<!-- navbar -->
@@ -808,19 +930,14 @@
 									? 'size-48'
 									: rmsLevel * 100 > 1
 										? 'size-44'
-										: 'size-40'}  transition-all rounded-full {(model?.info?.meta
-								?.profile_image_url ?? '/static/favicon.png') !== '/static/favicon.png'
-								? ' bg-cover bg-center bg-no-repeat'
-								: 'bg-black dark:bg-white'} "
-							style={(model?.info?.meta?.profile_image_url ?? '/static/favicon.png') !==
-							'/static/favicon.png'
-								? `background-image: url('${model?.info?.meta?.profile_image_url}');`
-								: ''}
+										: 'size-40'} transition-all rounded-full bg-cover bg-center bg-no-repeat"
+							style={`background-image: url('${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}&voice=true');`}
 						/>
 					{/if}
 				</button>
 			{:else}
 				<div class="relative flex video-container w-full max-h-full pt-2 pb-4 md:py-6 px-2 h-full">
+					<!-- svelte-ignore a11y-media-has-caption -->
 					<video
 						id="camera-feed"
 						autoplay
@@ -833,6 +950,7 @@
 					<div class=" absolute top-4 md:top-8 left-4">
 						<button
 							type="button"
+							aria-label={$i18n.t('Stop camera')}
 							class="p-1.5 text-white cursor-pointer backdrop-blur-xl bg-black/10 rounded-full"
 							on:click={() => {
 								stopCamera();
@@ -854,19 +972,46 @@
 			{/if}
 		</div>
 
-		<div class="flex justify-between items-center pb-2 w-full">
-			<div>
+		<div class="flex flex-col items-center gap-4 pb-4 w-full">
+			<button
+				type="button"
+				class="z-10"
+				on:click={() => {
+					if (assistantSpeaking) {
+						stopAllAudio();
+					}
+				}}
+			>
+				<div class="line-clamp-1 text-sm font-normal">
+					{#if loading}
+						{$i18n.t('Thinking...')}
+					{:else if muted}
+						{$i18n.t('Muted')}
+					{:else if assistantSpeaking}
+						{$i18n.t('Tap to interrupt')}
+					{:else}
+						{$i18n.t('Listening...')}
+					{/if}
+				</div>
+			</button>
+
+			<div class="flex items-center justify-center gap-4 z-10">
 				{#if camera}
 					<VideoInputMenu
 						devices={videoInputDevices}
 						on:change={async (e) => {
 							console.log(e.detail);
 							selectedVideoInputDeviceId = e.detail;
+							localStorage.setItem('selectedVideoInputDeviceId', e.detail);
 							await stopVideoStream();
 							await startVideoStream();
 						}}
 					>
-						<button class=" p-3 rounded-full bg-gray-50 dark:bg-gray-900" type="button">
+						<button
+							aria-label={$i18n.t('Switch camera')}
+							class="p-3 rounded-full bg-gray-50 dark:bg-gray-900"
+							type="button"
+						>
 							<svg
 								xmlns="http://www.w3.org/2000/svg"
 								viewBox="0 0 20 20"
@@ -884,7 +1029,8 @@
 				{:else}
 					<Tooltip content={$i18n.t('Camera')}>
 						<button
-							class=" p-3 rounded-full bg-gray-50 dark:bg-gray-900"
+							aria-label={$i18n.t('Camera')}
+							class="p-3 rounded-full bg-gray-50 dark:bg-gray-900"
 							type="button"
 							on:click={async () => {
 								await navigator.mediaDevices.getUserMedia({ video: true });
@@ -913,32 +1059,64 @@
 						</button>
 					</Tooltip>
 				{/if}
-			</div>
 
-			<div>
-				<button
-					type="button"
-					on:click={() => {
-						if (assistantSpeaking) {
-							stopAllAudio();
-						}
-					}}
-				>
-					<div class=" line-clamp-1 text-sm font-medium">
-						{#if loading}
-							{$i18n.t('Thinking...')}
-						{:else if assistantSpeaking}
-							{$i18n.t('Tap to interrupt')}
+				<Tooltip content={muted ? $i18n.t('Unmute') + ' (M)' : $i18n.t('Mute') + ' (M)'}>
+					<button
+						class="p-3 rounded-full transition-colors duration-200 {muted
+							? 'bg-red-500 text-white'
+							: 'bg-gray-50 dark:bg-gray-900'}"
+						type="button"
+						aria-label={muted ? $i18n.t('Unmute') : $i18n.t('Mute')}
+						on:click={toggleMute}
+					>
+						{#if muted}
+							<!-- Mic Off icon -->
+							<svg
+								xmlns="http://www.w3.org/2000/svg"
+								fill="none"
+								viewBox="0 0 24 24"
+								stroke-width="1.5"
+								stroke="currentColor"
+								class="size-5"
+							>
+								<path
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z"
+								/>
+								<line
+									x1="3"
+									y1="3"
+									x2="21"
+									y2="21"
+									stroke="currentColor"
+									stroke-width="1.5"
+									stroke-linecap="round"
+								/>
+							</svg>
 						{:else}
-							{$i18n.t('Listening...')}
+							<!-- Mic On icon -->
+							<svg
+								xmlns="http://www.w3.org/2000/svg"
+								fill="none"
+								viewBox="0 0 24 24"
+								stroke-width="1.5"
+								stroke="currentColor"
+								class="size-5"
+							>
+								<path
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z"
+								/>
+							</svg>
 						{/if}
-					</div>
-				</button>
-			</div>
+					</button>
+				</Tooltip>
 
-			<div>
 				<button
-					class=" p-3 rounded-full bg-gray-50 dark:bg-gray-900"
+					aria-label={$i18n.t('End call')}
+					class="p-3 rounded-full bg-gray-50 dark:bg-gray-900"
 					on:click={async () => {
 						await stopAudioStream();
 						await stopVideoStream();

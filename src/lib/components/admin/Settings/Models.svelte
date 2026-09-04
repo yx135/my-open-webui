@@ -1,1090 +1,1261 @@
 <script lang="ts">
-	import { toast } from 'svelte-sonner';
-	import { onMount, getContext } from 'svelte';
+	import { marked } from 'marked';
+	import Sortable from 'sortablejs';
+	import fileSaver from 'file-saver';
+	const { saveAs } = fileSaver;
 
-	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
-	import { WEBUI_NAME, models, MODEL_DOWNLOAD_POOL, user, config } from '$lib/stores';
-	import { splitStream } from '$lib/utils';
-
-	import {
-		createModel,
-		deleteModel,
-		downloadModel,
-		getOllamaUrls,
-		getOllamaVersion,
-		pullModel,
-		uploadModel,
-		getOllamaConfig
-	} from '$lib/apis/ollama';
-	import { getModels as _getModels } from '$lib/apis';
-
-	import Tooltip from '$lib/components/common/Tooltip.svelte';
-	import Spinner from '$lib/components/common/Spinner.svelte';
-	import ModelDeleteConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
-
+	import { onMount, onDestroy, getContext, tick } from 'svelte';
 	const i18n = getContext('i18n');
 
-	const getModels = async () => {
-		return await _getModels(localStorage.token);
+	import {
+		config,
+		models as _models,
+		pinnedModels,
+		settings,
+		showSettings,
+		user
+	} from '$lib/stores';
+	import {
+		createNewModel,
+		deleteAllModels,
+		getBaseModelTags,
+		getBaseModels,
+		getModelById,
+		toggleModelById,
+		updateModelById,
+		updateModelAccessGrants,
+		importModels
+	} from '$lib/apis/models';
+	import { copyToClipboard } from '$lib/utils';
+	import { updateUserSettings } from '$lib/apis/users';
+
+	import { getModels } from '$lib/apis';
+	import { getModelsConfig, setModelsConfig } from '$lib/apis/configs';
+	import Search from '$lib/components/icons/Search.svelte';
+	import Tooltip from '$lib/components/common/Tooltip.svelte';
+	import Switch from '$lib/components/common/Switch.svelte';
+	import Spinner from '$lib/components/common/Spinner.svelte';
+	import XMark from '$lib/components/icons/XMark.svelte';
+
+	import ModelEditor from '$lib/components/workspace/Models/ModelEditor.svelte';
+	import { toast } from 'svelte-sonner';
+	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
+	import ManageModelsModal from './Models/ManageModelsModal.svelte';
+	import ModelDefaultsPanel from './Models/ModelDefaultsPanel.svelte';
+	import ModelMenu from '$lib/components/admin/Settings/Models/ModelMenu.svelte';
+	import EllipsisHorizontal from '$lib/components/icons/EllipsisHorizontal.svelte';
+	import EyeSlash from '$lib/components/icons/EyeSlash.svelte';
+	import Eye from '$lib/components/icons/Eye.svelte';
+	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
+	import Check from '$lib/components/icons/Check.svelte';
+	import CheckCircle from '$lib/components/icons/CheckCircle.svelte';
+	import GarbageBin from '$lib/components/icons/GarbageBin.svelte';
+	import Minus from '$lib/components/icons/Minus.svelte';
+	import DocumentArrowUp from '$lib/components/icons/DocumentArrowUp.svelte';
+	import Download from '$lib/components/icons/Download.svelte';
+	import EllipsisVertical from '$lib/components/icons/EllipsisVertical.svelte';
+	import Wrench from '$lib/components/icons/Wrench.svelte';
+	import Pin from '$lib/components/icons/Pin.svelte';
+	import PinSlash from '$lib/components/icons/PinSlash.svelte';
+	import GlobeAlt from '$lib/components/icons/GlobeAlt.svelte';
+	import LockClosed from '$lib/components/icons/LockClosed.svelte';
+	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { goto } from '$app/navigation';
+
+	import Dropdown from '$lib/components/common/Dropdown.svelte';
+	import DropdownMenu from '$lib/components/common/DropdownMenu.svelte';
+	import AdminViewSelector from './Models/AdminViewSelector.svelte';
+	import TagSelector from '$lib/components/workspace/common/TagSelector.svelte';
+
+	type ModelListItem = { id: string; name?: string };
+
+	let shiftKey = false;
+
+	export let tabState: Record<string, unknown> | null = null;
+
+	let modelsImportInProgress = false;
+	let importFiles;
+	let modelsImportInputElement: HTMLInputElement;
+	let tagsContainerElement: HTMLDivElement;
+	let modelListElement: HTMLDivElement;
+	let sortable = null;
+
+	let models = null;
+	let modelsConfig = null;
+	let modelOrderList: string[] = [];
+	let defaultModelIds: string[] = [];
+	let defaultPinnedModelIds: string[] = [];
+	let defaultModelIdSet = new Set<string>();
+	let defaultPinnedModelIdSet = new Set<string>();
+
+	let baseModels: ModelListItem[] = [];
+	let allModels: ModelListItem[] = [];
+
+	let filteredModels = [];
+	let selectedModelId = null;
+
+	let showManageModal = false;
+	let showResetModal = false;
+	let savingModelOrder = false;
+	let savingModelsSettings = false;
+	let modelOrderDirty = false;
+	let modelDefaultsPanel = null;
+	let modelDefaultsDirty = false;
+
+	let viewOption = ''; // '' = All, 'enabled', 'disabled', 'visible', 'hidden'
+	let tags: string[] = [];
+	let selectedTag = '';
+
+	$: if (typeof tabState?.id === 'string' && tabState.id) {
+		selectedModelId = tabState.id;
+		tabState = null;
+	}
+
+	const isPublicModel = (model) => {
+		return (model?.access_grants ?? []).some(
+			(g) => g.principal_type === 'user' && g.principal_id === '*' && g.permission === 'read'
+		);
 	};
 
-	let modelUploadInputElement: HTMLInputElement;
+	const isSharedModel = (model) => (model?.access_grants ?? []).length > 0 && !isPublicModel(model);
 
-	let showModelDeleteConfirm = false;
+	const isPresetModel = (model: any) =>
+		!!(model?.preset || model?.base_model_id || model?.info?.base_model_id);
 
-	// Models
-
-	let ollamaEnabled = null;
-
-	let OLLAMA_URLS = [];
-	let selectedOllamaUrlIdx: number | null = null;
-
-	let updateModelId = null;
-	let updateProgress = null;
-
-	let showExperimentalOllama = false;
-
-	let ollamaVersion = null;
-	const MAX_PARALLEL_DOWNLOADS = 3;
-
-	let modelTransferring = false;
-	let modelTag = '';
-
-	let createModelLoading = false;
-	let createModelTag = '';
-	let createModelContent = '';
-	let createModelDigest = '';
-	let createModelPullProgress = null;
-
-	let digest = '';
-	let pullProgress = null;
-
-	let modelUploadMode = 'file';
-	let modelInputFile: File[] | null = null;
-	let modelFileUrl = '';
-	let modelFileContent = `TEMPLATE """{{ .System }}\nUSER: {{ .Prompt }}\nASSISTANT: """\nPARAMETER num_ctx 4096\nPARAMETER stop "</s>"\nPARAMETER stop "USER:"\nPARAMETER stop "ASSISTANT:"`;
-	let modelFileDigest = '';
-
-	let uploadProgress = null;
-	let uploadMessage = '';
-
-	let deleteModelTag = '';
-
-	const updateModelsHandler = async () => {
-		for (const model of $models.filter(
-			(m) =>
-				!(m?.preset ?? false) &&
-				m.owned_by === 'ollama' &&
-				(selectedOllamaUrlIdx === null
-					? true
-					: (m?.ollama?.urls ?? []).includes(selectedOllamaUrlIdx))
-		)) {
-			console.log(model);
-
-			updateModelId = model.id;
-			const [res, controller] = await pullModel(
-				localStorage.token,
-				model.id,
-				selectedOllamaUrlIdx
-			).catch((error) => {
-				toast.error(error);
-				return null;
-			});
-
-			if (res) {
-				const reader = res.body
-					.pipeThrough(new TextDecoderStream())
-					.pipeThrough(splitStream('\n'))
-					.getReader();
-
-				while (true) {
-					try {
-						const { value, done } = await reader.read();
-						if (done) break;
-
-						let lines = value.split('\n');
-
-						for (const line of lines) {
-							if (line !== '') {
-								let data = JSON.parse(line);
-
-								console.log(data);
-								if (data.error) {
-									throw data.error;
-								}
-								if (data.detail) {
-									throw data.detail;
-								}
-								if (data.status) {
-									if (data.digest) {
-										updateProgress = 0;
-										if (data.completed) {
-											updateProgress = Math.round((data.completed / data.total) * 1000) / 10;
-										} else {
-											updateProgress = 100;
-										}
-									} else {
-										toast.success(data.status);
-									}
-								}
-							}
-						}
-					} catch (error) {
-						console.log(error);
-					}
-				}
-			}
+	const modelAccessLabel = (model) => {
+		if (isPublicModel(model)) {
+			return $i18n.t('Public');
 		}
-
-		updateModelId = null;
-		updateProgress = null;
+		if (isSharedModel(model)) {
+			return $i18n.t('Shared');
+		}
+		return $i18n.t('Private');
 	};
 
-	const pullModelHandler = async () => {
-		const sanitizedModelTag = modelTag.trim().replace(/^ollama\s+(run|pull)\s+/, '');
-		console.log($MODEL_DOWNLOAD_POOL);
-		if ($MODEL_DOWNLOAD_POOL[sanitizedModelTag]) {
-			toast.error(
-				$i18n.t(`Model '{{modelTag}}' is already in queue for downloading.`, {
-					modelTag: sanitizedModelTag
-				})
-			);
-			return;
+	const modelAccessClass = (model) => {
+		if (isPublicModel(model)) {
+			return 'text-[#4f7a5a] dark:text-[#8db395]';
 		}
-		if (Object.keys($MODEL_DOWNLOAD_POOL).length === MAX_PARALLEL_DOWNLOADS) {
-			toast.error(
-				$i18n.t('Maximum of 3 models can be downloaded simultaneously. Please try again later.')
-			);
-			return;
+		if (isSharedModel(model)) {
+			return 'text-[#4f6f93] dark:text-[#8ba6c6]';
 		}
-
-		const [res, controller] = await pullModel(
-			localStorage.token,
-			sanitizedModelTag,
-			selectedOllamaUrlIdx
-		).catch((error) => {
-			toast.error(error);
-			return null;
-		});
-
-		if (res) {
-			const reader = res.body
-				.pipeThrough(new TextDecoderStream())
-				.pipeThrough(splitStream('\n'))
-				.getReader();
-
-			MODEL_DOWNLOAD_POOL.set({
-				...$MODEL_DOWNLOAD_POOL,
-				[sanitizedModelTag]: {
-					...$MODEL_DOWNLOAD_POOL[sanitizedModelTag],
-					abortController: controller,
-					reader,
-					done: false
-				}
-			});
-
-			while (true) {
-				try {
-					const { value, done } = await reader.read();
-					if (done) break;
-
-					let lines = value.split('\n');
-
-					for (const line of lines) {
-						if (line !== '') {
-							let data = JSON.parse(line);
-							console.log(data);
-							if (data.error) {
-								throw data.error;
-							}
-							if (data.detail) {
-								throw data.detail;
-							}
-
-							if (data.status) {
-								if (data.digest) {
-									let downloadProgress = 0;
-									if (data.completed) {
-										downloadProgress = Math.round((data.completed / data.total) * 1000) / 10;
-									} else {
-										downloadProgress = 100;
-									}
-
-									MODEL_DOWNLOAD_POOL.set({
-										...$MODEL_DOWNLOAD_POOL,
-										[sanitizedModelTag]: {
-											...$MODEL_DOWNLOAD_POOL[sanitizedModelTag],
-											pullProgress: downloadProgress,
-											digest: data.digest
-										}
-									});
-								} else {
-									toast.success(data.status);
-
-									MODEL_DOWNLOAD_POOL.set({
-										...$MODEL_DOWNLOAD_POOL,
-										[sanitizedModelTag]: {
-											...$MODEL_DOWNLOAD_POOL[sanitizedModelTag],
-											done: data.status === 'success'
-										}
-									});
-								}
-							}
-						}
-					}
-				} catch (error) {
-					console.log(error);
-					if (typeof error !== 'string') {
-						error = error.message;
-					}
-
-					toast.error(error);
-					// opts.callback({ success: false, error, modelName: opts.modelName });
-				}
-			}
-
-			console.log($MODEL_DOWNLOAD_POOL[sanitizedModelTag]);
-
-			if ($MODEL_DOWNLOAD_POOL[sanitizedModelTag].done) {
-				toast.success(
-					$i18n.t(`Model '{{modelName}}' has been successfully downloaded.`, {
-						modelName: sanitizedModelTag
-					})
-				);
-
-				models.set(await getModels());
-			} else {
-				toast.error($i18n.t('Download canceled'));
-			}
-
-			delete $MODEL_DOWNLOAD_POOL[sanitizedModelTag];
-
-			MODEL_DOWNLOAD_POOL.set({
-				...$MODEL_DOWNLOAD_POOL
-			});
-		}
-
-		modelTag = '';
-		modelTransferring = false;
+		return 'text-gray-500 dark:text-gray-400';
 	};
 
-	const uploadModelHandler = async () => {
-		modelTransferring = true;
+	$: defaultModelIdSet = new Set(defaultModelIds);
+	$: defaultPinnedModelIdSet = new Set(defaultPinnedModelIds);
 
-		let uploaded = false;
-		let fileResponse = null;
-		let name = '';
+	$: if (models) {
+		const modelOrder = new Map(modelOrderList.map((id, idx) => [id, idx]));
 
-		if (modelUploadMode === 'file') {
-			const file = modelInputFile ? modelInputFile[0] : null;
+		filteredModels = models
+			.filter((m) => searchValue === '' || m.name.toLowerCase().includes(searchValue.toLowerCase()))
+			.filter((m) => {
+				if (viewOption === 'enabled') return m?.is_active ?? true;
+				if (viewOption === 'disabled') return !(m?.is_active ?? true);
+				if (viewOption === 'visible') return !(m?.meta?.hidden ?? false);
+				if (viewOption === 'hidden') return m?.meta?.hidden === true;
+				if (viewOption === 'public') return isPublicModel(m);
+				if (viewOption === 'private') return !isPublicModel(m);
+				if (viewOption === 'selected') return defaultModelIdSet.has(m.id);
+				if (viewOption === 'pinned') return defaultPinnedModelIdSet.has(m.id);
+				return true; // All
+			})
+			.sort((a, b) => {
+				const orderA = modelOrder.get(a.id) ?? Number.MAX_SAFE_INTEGER;
+				const orderB = modelOrder.get(b.id) ?? Number.MAX_SAFE_INTEGER;
 
-			if (file) {
-				uploadMessage = 'Uploading...';
+				if (orderA !== orderB) {
+					return orderA - orderB;
+				}
 
-				fileResponse = await uploadModel(localStorage.token, file, selectedOllamaUrlIdx).catch(
-					(error) => {
-						toast.error(error);
-						return null;
-					}
-				);
-			}
-		} else {
-			uploadProgress = 0;
-			fileResponse = await downloadModel(
-				localStorage.token,
-				modelFileUrl,
-				selectedOllamaUrlIdx
-			).catch((error) => {
-				toast.error(error);
-				return null;
+				return (a?.name ?? a?.id ?? '').localeCompare(b?.name ?? b?.id ?? '');
 			});
-		}
+	}
 
-		if (fileResponse && fileResponse.ok) {
-			const reader = fileResponse.body
-				.pipeThrough(new TextDecoderStream())
-				.pipeThrough(splitStream('\n'))
-				.getReader();
+	let searchValue = '';
+	let canReorderModels = false;
 
-			while (true) {
-				const { value, done } = await reader.read();
-				if (done) break;
+	$: canReorderModels = searchValue === '' && viewOption === '' && selectedTag === '';
 
-				try {
-					let lines = value.split('\n');
-
-					for (const line of lines) {
-						if (line !== '') {
-							let data = JSON.parse(line.replace(/^data: /, ''));
-
-							if (data.progress) {
-								if (uploadMessage) {
-									uploadMessage = '';
-								}
-								uploadProgress = data.progress;
-							}
-
-							if (data.error) {
-								throw data.error;
-							}
-
-							if (data.done) {
-								modelFileDigest = data.blob;
-								name = data.name;
-								uploaded = true;
-							}
-						}
-					}
-				} catch (error) {
-					console.log(error);
-				}
-			}
-		} else {
-			const error = await fileResponse?.json();
-			toast.error(error?.detail ?? error);
-		}
-
-		if (uploaded) {
-			const res = await createModel(
-				localStorage.token,
-				`${name}:latest`,
-				`FROM @${modelFileDigest}\n${modelFileContent}`
-			);
-
-			if (res && res.ok) {
-				const reader = res.body
-					.pipeThrough(new TextDecoderStream())
-					.pipeThrough(splitStream('\n'))
-					.getReader();
-
-				while (true) {
-					const { value, done } = await reader.read();
-					if (done) break;
-
-					try {
-						let lines = value.split('\n');
-
-						for (const line of lines) {
-							if (line !== '') {
-								console.log(line);
-								let data = JSON.parse(line);
-								console.log(data);
-
-								if (data.error) {
-									throw data.error;
-								}
-								if (data.detail) {
-									throw data.detail;
-								}
-
-								if (data.status) {
-									if (
-										!data.digest &&
-										!data.status.includes('writing') &&
-										!data.status.includes('sha256')
-									) {
-										toast.success(data.status);
-									} else {
-										if (data.digest) {
-											digest = data.digest;
-
-											if (data.completed) {
-												pullProgress = Math.round((data.completed / data.total) * 1000) / 10;
-											} else {
-												pullProgress = 100;
-											}
-										}
-									}
-								}
-							}
-						}
-					} catch (error) {
-						console.log(error);
-						toast.error(error);
-					}
-				}
-			}
-		}
-
-		modelFileUrl = '';
-
-		if (modelUploadInputElement) {
-			modelUploadInputElement.value = '';
-		}
-		modelInputFile = null;
-		modelTransferring = false;
-		uploadProgress = null;
-
-		models.set(await getModels());
-	};
-
-	const deleteModelHandler = async () => {
-		const res = await deleteModel(localStorage.token, deleteModelTag, selectedOllamaUrlIdx).catch(
-			(error) => {
-				toast.error(error);
-			}
+	const enableAllHandler = async () => {
+		const modelsToEnable = filteredModels.filter((m) => !(m.is_active ?? true));
+		// Optimistic UI update
+		modelsToEnable.forEach((m) => (m.is_active = true));
+		models = models;
+		// Sync with server
+		await Promise.all(
+			modelsToEnable.map((model) => upsertModelHandler(model, { is_active: true }, false))
 		);
 
-		if (res) {
-			toast.success($i18n.t(`Deleted {{deleteModelTag}}`, { deleteModelTag }));
-		}
-
-		deleteModelTag = '';
-		models.set(await getModels());
+		await tick();
+		await init();
 	};
 
-	const cancelModelPullHandler = async (model: string) => {
-		const { reader, abortController } = $MODEL_DOWNLOAD_POOL[model];
-		if (abortController) {
-			abortController.abort();
+	const disableAllHandler = async () => {
+		const modelsToDisable = filteredModels.filter((m) => m.is_active ?? true);
+		// Optimistic UI update
+		modelsToDisable.forEach((m) => (m.is_active = false));
+		models = models;
+		// Sync with server
+		await Promise.all(
+			modelsToDisable.map((model) => upsertModelHandler(model, { is_active: false }, false))
+		);
+
+		await tick();
+		await init();
+	};
+
+	const showAllHandler = async () => {
+		const modelsToShow = filteredModels.filter((m) => m?.meta?.hidden === true);
+		// Optimistic UI update
+		modelsToShow.forEach((m) => {
+			m.meta = { ...m.meta, hidden: false };
+		});
+		models = models;
+		// Sync with server
+		await Promise.all(
+			modelsToShow.map((model) =>
+				upsertModelHandler(model, { meta: { ...model.meta, hidden: false } }, false)
+			)
+		);
+
+		toast.success($i18n.t('All models are now visible'));
+		await tick();
+		await init();
+	};
+
+	const hideAllHandler = async () => {
+		const modelsToHide = filteredModels.filter((m) => !(m?.meta?.hidden ?? false));
+		// Optimistic UI update
+		modelsToHide.forEach((m) => {
+			m.meta = { ...m.meta, hidden: true };
+		});
+		models = models;
+		// Sync with server
+		await Promise.all(
+			modelsToHide.map((model) =>
+				upsertModelHandler(model, { meta: { ...model.meta, hidden: true } }, false)
+			)
+		);
+
+		toast.success($i18n.t('All models are now hidden'));
+		await tick();
+		await init();
+	};
+
+	const downloadModels = async (models) => {
+		models = await Promise.all(models.map(getFullModel));
+		let blob = new Blob([JSON.stringify(models)], {
+			type: 'application/json'
+		});
+		saveAs(blob, `models-export-${Date.now()}.json`);
+	};
+
+	const init = async () => {
+		models = null;
+
+		modelsConfig = await getModelsConfig(localStorage.token);
+		modelOrderList = modelsConfig?.MODEL_ORDER_LIST ?? [];
+		defaultModelIds = (modelsConfig?.DEFAULT_MODELS ?? '').split(',').filter((id) => id);
+		defaultPinnedModelIds = (modelsConfig?.DEFAULT_PINNED_MODELS ?? '')
+			.split(',')
+			.filter((id) => id);
+
+		tags = await getBaseModelTags(localStorage.token);
+		if (selectedTag && !tags.includes(selectedTag)) {
+			selectedTag = '';
 		}
-		if (reader) {
-			await reader.cancel();
-			delete $MODEL_DOWNLOAD_POOL[model];
-			MODEL_DOWNLOAD_POOL.set({
-				...$MODEL_DOWNLOAD_POOL
+
+		baseModels = await getBaseModels(localStorage.token, selectedTag);
+		allModels = await getModels(localStorage.token);
+
+		const providerModels = await getModels(localStorage.token, null, true);
+		const allModelIds = new Set<string>(allModels.map((model: ModelListItem) => model.id));
+		allModels = [
+			...allModels,
+			...providerModels.filter((model: ModelListItem) => !allModelIds.has(model.id))
+		];
+
+		const baseModelIds = new Set<string>(baseModels.map((model: ModelListItem) => model.id));
+
+		models = allModels
+			.filter((m: ModelListItem) => !selectedTag || baseModelIds.has(m.id))
+			.map((m: ModelListItem) => {
+				const baseModel = baseModels.find((model: ModelListItem) => model.id === m.id);
+
+				if (baseModel) {
+					return {
+						...m,
+						...baseModel
+					};
+				} else {
+					return {
+						...m,
+						id: m.id,
+						name: m.name,
+
+						is_active: true
+					};
+				}
 			});
-			await deleteModel(localStorage.token, model);
-			toast.success(`${model} download has been canceled`);
-		}
+
+		modelOrderList = [
+			...modelOrderList.filter((id) => models.some((model) => model.id === id)),
+			...models
+				.map((model) => model.id)
+				.filter((id) => !modelOrderList.includes(id))
+				.sort((a, b) => a.localeCompare(b))
+		];
+		modelOrderDirty = false;
+
+		_models.set(
+			await getModels(
+				localStorage.token,
+				$config?.features?.enable_direct_connections && ($settings?.directConnections ?? null)
+			)
+		);
 	};
 
-	const createModelHandler = async () => {
-		createModelLoading = true;
-		const res = await createModel(
-			localStorage.token,
-			createModelTag,
-			createModelContent,
-			selectedOllamaUrlIdx
-		).catch((error) => {
-			toast.error(error);
+	const saveModelOrder = async (orderedModelIds: string[]) => {
+		savingModelOrder = true;
+
+		const res = await setModelsConfig(localStorage.token, {
+			DEFAULT_MODELS: defaultModelIds.join(','),
+			DEFAULT_PINNED_MODELS: defaultPinnedModelIds.join(','),
+			MODEL_ORDER_LIST: orderedModelIds,
+			DEFAULT_MODEL_METADATA: modelsConfig?.DEFAULT_MODEL_METADATA ?? null,
+			DEFAULT_MODEL_PARAMS: modelsConfig?.DEFAULT_MODEL_PARAMS ?? null
+		}).catch((error) => {
+			toast.error(`${error}`);
 			return null;
 		});
 
-		if (res && res.ok) {
-			const reader = res.body
-				.pipeThrough(new TextDecoderStream())
-				.pipeThrough(splitStream('\n'))
-				.getReader();
-
-			while (true) {
-				const { value, done } = await reader.read();
-				if (done) break;
-
-				try {
-					let lines = value.split('\n');
-
-					for (const line of lines) {
-						if (line !== '') {
-							console.log(line);
-							let data = JSON.parse(line);
-							console.log(data);
-
-							if (data.error) {
-								throw data.error;
-							}
-							if (data.detail) {
-								throw data.detail;
-							}
-
-							if (data.status) {
-								if (
-									!data.digest &&
-									!data.status.includes('writing') &&
-									!data.status.includes('sha256')
-								) {
-									toast.success(data.status);
-								} else {
-									if (data.digest) {
-										createModelDigest = data.digest;
-
-										if (data.completed) {
-											createModelPullProgress =
-												Math.round((data.completed / data.total) * 1000) / 10;
-										} else {
-											createModelPullProgress = 100;
-										}
-									}
-								}
-							}
-						}
-					}
-				} catch (error) {
-					console.log(error);
-					toast.error(error);
-				}
-			}
+		if (res) {
+			modelsConfig = res;
+			modelOrderDirty = false;
+			toast.success($i18n.t('Model order saved successfully'));
+			_models.set(
+				await getModels(
+					localStorage.token,
+					$config?.features?.enable_direct_connections && ($settings?.directConnections ?? null)
+				)
+			);
 		}
 
-		models.set(await getModels());
+		savingModelOrder = false;
+	};
 
-		createModelLoading = false;
+	const saveModelsSettings = async () => {
+		savingModelsSettings = true;
 
-		createModelTag = '';
-		createModelContent = '';
-		createModelDigest = '';
-		createModelPullProgress = null;
+		if (modelOrderDirty) {
+			await saveModelOrder(modelOrderList);
+		}
+
+		if (modelDefaultsDirty) {
+			await modelDefaultsPanel?.save();
+		}
+
+		savingModelsSettings = false;
+	};
+
+	const saveModelDefaults = async (
+		nextDefaultModelIds: string[],
+		nextDefaultPinnedModelIds: string[],
+		successMessage: string
+	) => {
+		const previousDefaultModelIds = defaultModelIds;
+		const previousDefaultPinnedModelIds = defaultPinnedModelIds;
+
+		defaultModelIds = nextDefaultModelIds;
+		defaultPinnedModelIds = nextDefaultPinnedModelIds;
+
+		const res = await setModelsConfig(localStorage.token, {
+			DEFAULT_MODELS: nextDefaultModelIds.join(','),
+			DEFAULT_PINNED_MODELS: nextDefaultPinnedModelIds.join(','),
+			MODEL_ORDER_LIST: modelsConfig?.MODEL_ORDER_LIST ?? [],
+			DEFAULT_MODEL_METADATA: modelsConfig?.DEFAULT_MODEL_METADATA ?? null,
+			DEFAULT_MODEL_PARAMS: modelsConfig?.DEFAULT_MODEL_PARAMS ?? null
+		}).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		});
+
+		if (res) {
+			modelsConfig = res;
+			toast.success(successMessage);
+		} else {
+			defaultModelIds = previousDefaultModelIds;
+			defaultPinnedModelIds = previousDefaultPinnedModelIds;
+		}
+	};
+
+	const toggleDefaultModelHandler = async (model) => {
+		const isSelected = defaultModelIdSet.has(model.id);
+		const nextDefaultModelIds = isSelected
+			? defaultModelIds.filter((id) => id !== model.id)
+			: [...new Set([...defaultModelIds, model.id])];
+
+		await saveModelDefaults(
+			nextDefaultModelIds,
+			defaultPinnedModelIds,
+			isSelected
+				? $i18n.t('Model removed from selected models')
+				: $i18n.t('Model added to selected models')
+		);
+	};
+
+	const toggleDefaultPinnedModelHandler = async (model) => {
+		const isPinned = defaultPinnedModelIdSet.has(model.id);
+		const nextDefaultPinnedModelIds = isPinned
+			? defaultPinnedModelIds.filter((id) => id !== model.id)
+			: [...new Set([...defaultPinnedModelIds, model.id])];
+
+		await saveModelDefaults(
+			defaultModelIds,
+			nextDefaultPinnedModelIds,
+			isPinned
+				? $i18n.t('Model removed from pinned models')
+				: $i18n.t('Model added to pinned models')
+		);
+	};
+
+	const positionChangeHandler = async (event) => {
+		const { oldIndex, newIndex, item } = event;
+
+		if (oldIndex === undefined || newIndex === undefined || oldIndex === newIndex) {
+			return;
+		}
+
+		const parent = item.parentNode;
+		const target = parent.children[oldIndex < newIndex ? oldIndex : oldIndex + 1];
+		parent.insertBefore(item, target);
+
+		const updatedModels = [...filteredModels];
+		const [movedModel] = updatedModels.splice(oldIndex, 1);
+		updatedModels.splice(newIndex, 0, movedModel);
+
+		const orderedIds = updatedModels.map((model) => model.id);
+		const orderedSet = new Set(orderedIds);
+
+		models = [...updatedModels, ...models.filter((model) => !orderedSet.has(model.id))];
+		modelOrderList = models.map((model) => model.id);
+		modelOrderDirty = true;
+	};
+
+	const initSortable = () => {
+		if (sortable) {
+			sortable.destroy();
+			sortable = null;
+		}
+
+		if (modelListElement && filteredModels.length > 0 && canReorderModels) {
+			sortable = new Sortable(modelListElement, {
+				animation: 150,
+				handle: '.model-item-handle',
+				onUpdate: positionChangeHandler
+			});
+		}
+	};
+
+	$: if (modelListElement && filteredModels) {
+		tick().then(() => {
+			initSortable();
+		});
+	}
+
+	const upsertModelHandler = async (model, overrides = {}, showToast = true) => {
+		model = { ...model, ...(isPresetModel(model) ? {} : { base_model_id: null }), ...overrides };
+
+		if (baseModels.find((m: ModelListItem) => m.id === model.id) || isPresetModel(model)) {
+			const res = await updateModelById(localStorage.token, model.id, model).catch((error) => {
+				return null;
+			});
+
+			if (res && showToast) {
+				toast.success($i18n.t('Model updated successfully'));
+			}
+		} else {
+			const res = await createNewModel(localStorage.token, {
+				meta: {},
+				id: model.id,
+				name: model.name,
+				base_model_id: null,
+				params: {},
+				access_grants: [],
+				...model
+			}).catch((error) => {
+				return null;
+			});
+
+			if (res && showToast) {
+				toast.success($i18n.t('Model updated successfully'));
+				await init();
+			}
+		}
+	};
+
+	const toggleModelHandler = async (model) => {
+		if (!Object.keys(model).includes('base_model_id') && !isPresetModel(model)) {
+			await createNewModel(localStorage.token, {
+				id: model.id,
+				name: model.name,
+				base_model_id: null,
+				meta: {},
+				params: {},
+				access_grants: [],
+				is_active: model.is_active
+			}).catch((error) => {
+				return null;
+			});
+		} else {
+			await toggleModelById(localStorage.token, model.id);
+		}
+
+		// await init();
+		_models.set(
+			await getModels(
+				localStorage.token,
+				$config?.features?.enable_direct_connections && ($settings?.directConnections ?? null)
+			)
+		);
+	};
+
+	const hideModelHandler = async (model) => {
+		const updatedModel = {
+			...model,
+			meta: {
+				...model.meta,
+				hidden: !(model?.meta?.hidden ?? false)
+			}
+		};
+
+		await upsertModelHandler(updatedModel, { meta: updatedModel.meta }, false);
+		models = models.map((model) => (model.id === updatedModel.id ? updatedModel : model));
+		_models.set(
+			await getModels(
+				localStorage.token,
+				$config?.features?.enable_direct_connections && ($settings?.directConnections ?? null)
+			)
+		);
+
+		toast.success(
+			updatedModel.meta.hidden
+				? $i18n.t(`Model {{name}} is now hidden`, {
+						name: updatedModel.id
+					})
+				: $i18n.t(`Model {{name}} is now visible`, {
+						name: updatedModel.id
+					})
+		);
+	};
+
+	const toggleModelPrivacyHandler = async (model) => {
+		const nextAccessGrants = isPublicModel(model)
+			? []
+			: [
+					...(model?.access_grants ?? []),
+					{
+						principal_type: 'user',
+						principal_id: '*',
+						permission: 'read'
+					}
+				];
+
+		const res = await updateModelAccessGrants(
+			localStorage.token,
+			model.id,
+			model.name,
+			nextAccessGrants
+		).catch(() => null);
+
+		if (res) {
+			models = models.map((m) =>
+				m.id === model.id ? { ...m, access_grants: res.access_grants ?? nextAccessGrants } : m
+			);
+			_models.set(
+				await getModels(
+					localStorage.token,
+					$config?.features?.enable_direct_connections && ($settings?.directConnections ?? null)
+				)
+			);
+			toast.success(
+				isPublicModel({ access_grants: nextAccessGrants })
+					? $i18n.t('Model is now public')
+					: $i18n.t('Model is now private')
+			);
+		}
+	};
+
+	const copyLinkHandler = async (model) => {
+		const baseUrl = window.location.origin;
+		const res = await copyToClipboard(`${baseUrl}/?model=${encodeURIComponent(model.id)}`);
+
+		if (res) {
+			toast.success($i18n.t('Copied link to clipboard'));
+		} else {
+			toast.error($i18n.t('Failed to copy link'));
+		}
+	};
+
+	const getFullModel = async (model: any) =>
+		baseModels.some((baseModel) => baseModel.id === model.id) || isPresetModel(model)
+			? ((await getModelById(localStorage.token, model.id).catch(() => null)) ?? model)
+			: model;
+
+	const openModelHandler = async (model: any) => {
+		if (isPresetModel(model)) {
+			showSettings.set(false);
+			await goto(`/workspace/models/edit?id=${encodeURIComponent(model.id)}`);
+			return;
+		}
+
+		selectedModelId = model.id;
+	};
+
+	const cloneHandler = async (model) => {
+		model = await getFullModel(model);
+		sessionStorage.model = JSON.stringify({
+			...model,
+			base_model_id: model.id,
+			id: `${model.id}-clone`,
+			name: `${model.name} (Clone)`
+		});
+		showSettings.set(false);
+		await goto('/workspace/models/create');
+	};
+
+	const exportModelHandler = async (model) => {
+		model = await getFullModel(model);
+		let blob = new Blob([JSON.stringify([model])], {
+			type: 'application/json'
+		});
+		saveAs(blob, `${model.id}-${Date.now()}.json`);
+	};
+
+	const pinModelHandler = async (modelId) => {
+		settings.set({
+			...$settings,
+			pinnedModels: $pinnedModels.includes(modelId)
+				? $pinnedModels.filter((id) => id !== modelId)
+				: [...$pinnedModels, modelId]
+		});
+		await updateUserSettings(localStorage.token, { ui: $settings });
 	};
 
 	onMount(async () => {
-		const ollamaConfig = await getOllamaConfig(localStorage.token);
+		await init();
 
-		if (ollamaConfig.ENABLE_OLLAMA_API) {
-			ollamaEnabled = true;
+		const onKeyDown = (event) => {
+			if (event.key === 'Shift') {
+				shiftKey = true;
+			}
+		};
 
-			await Promise.all([
-				(async () => {
-					OLLAMA_URLS = await getOllamaUrls(localStorage.token).catch((error) => {
-						toast.error(error);
-						return [];
-					});
+		const onKeyUp = (event) => {
+			if (event.key === 'Shift') {
+				shiftKey = false;
+			}
+		};
 
-					if (OLLAMA_URLS.length > 0) {
-						selectedOllamaUrlIdx = 0;
-					}
-				})(),
-				(async () => {
-					ollamaVersion = await getOllamaVersion(localStorage.token).catch((error) => false);
-				})()
-			]);
-		} else {
-			ollamaEnabled = false;
-			toast.error($i18n.t('Ollama API is disabled'));
+		const onBlur = () => {
+			shiftKey = false;
+		};
+
+		window.addEventListener('keydown', onKeyDown);
+		window.addEventListener('keyup', onKeyUp);
+		window.addEventListener('blur', onBlur);
+
+		return () => {
+			window.removeEventListener('keydown', onKeyDown);
+			window.removeEventListener('keyup', onKeyUp);
+			window.removeEventListener('blur', onBlur);
+		};
+	});
+
+	onDestroy(() => {
+		if (sortable) {
+			sortable.destroy();
 		}
 	});
 </script>
 
-<ModelDeleteConfirmDialog
-	bind:show={showModelDeleteConfirm}
-	on:confirm={() => {
-		deleteModelHandler();
+<ConfirmDialog
+	title={$i18n.t('Reset All Models')}
+	message={$i18n.t('This will delete all models including custom models and cannot be undone.')}
+	bind:show={showResetModal}
+	onConfirm={async () => {
+		const res = await deleteAllModels(localStorage.token);
+		if (res) {
+			toast.success($i18n.t('All models deleted successfully'));
+			await init();
+		}
 	}}
 />
 
-<div class="flex flex-col h-full justify-between text-sm">
-	<div class=" space-y-3 overflow-y-scroll scrollbar-hidden h-full">
-		{#if ollamaEnabled}
-			{#if ollamaVersion !== null}
-				<div class="space-y-2 pr-1.5">
-					<div class="text-sm font-medium">{$i18n.t('Manage Ollama Models')}</div>
+<ManageModelsModal bind:show={showManageModal} />
 
-					{#if OLLAMA_URLS.length > 0}
-						<div class="flex gap-2">
-							<div class="flex-1 pb-1">
-								<select
-									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-none"
-									bind:value={selectedOllamaUrlIdx}
-									placeholder={$i18n.t('Select an Ollama instance')}
+{#if models !== null}
+	{#if selectedModelId === null}
+		<div class="flex h-full min-h-0 flex-col text-sm">
+			<div class="mb-2 flex items-center justify-between">
+				<h2 class="text-sm font-medium text-gray-900 dark:text-white">
+					{$i18n.t('Models')}
+					<span class="ml-2 font-normal text-gray-500 dark:text-gray-500">
+						{filteredModels.length}
+					</span>
+				</h2>
+			</div>
+
+			{#if $user?.role === 'admin'}
+				<input
+					id="models-import-input"
+					bind:this={modelsImportInputElement}
+					bind:files={importFiles}
+					type="file"
+					accept=".json"
+					hidden
+					on:change={() => {
+						if (importFiles.length > 0) {
+							const reader = new FileReader();
+							reader.onload = async (event) => {
+								modelsImportInProgress = true;
+
+								try {
+									const models = JSON.parse(String(event.target.result));
+									const res = await importModels(localStorage.token, models);
+
+									if (res) {
+										toast.success($i18n.t('Models imported successfully'));
+										await init();
+									} else {
+										toast.error($i18n.t('Failed to import models'));
+									}
+								} catch (e) {
+									toast.error(e?.detail ?? $i18n.t('Invalid JSON file'));
+									console.error(e);
+								}
+
+								modelsImportInProgress = false;
+							};
+							reader.readAsText(importFiles[0]);
+						}
+					}}
+				/>
+			{/if}
+
+			<div class="flex min-h-0 flex-1 flex-col space-y-1">
+				<ModelDefaultsPanel
+					bind:this={modelDefaultsPanel}
+					bind:dirty={modelDefaultsDirty}
+					initHandler={init}
+				/>
+
+				<div class="flex h-8 shrink-0 items-center w-full gap-2">
+					<div class="flex min-w-0 flex-1 items-center">
+						<div class=" self-center ml-1 mr-3">
+							<Search className="size-3.5" />
+						</div>
+						<input
+							data-settings-search
+							class=" w-full text-sm py-1 rounded-r-xl outline-hidden bg-transparent"
+							bind:value={searchValue}
+							placeholder={$i18n.t('Search Models')}
+						/>
+						{#if searchValue}
+							<div class="self-center pl-1.5 translate-y-[0.5px] rounded-l-xl bg-transparent">
+								<button
+									class="p-0.5 rounded-full hover:bg-gray-100 dark:hover:bg-gray-900 transition"
+									aria-label={$i18n.t('Clear search')}
+									on:click={() => {
+										searchValue = '';
+									}}
 								>
-									{#each OLLAMA_URLS as url, idx}
-										<option value={idx} class="bg-gray-50 dark:bg-gray-700">{url}</option>
-									{/each}
-								</select>
+									<XMark className="size-3" strokeWidth="2" />
+								</button>
 							</div>
+						{/if}
+					</div>
 
-							<div>
-								<div class="flex w-full justify-end">
-									<Tooltip content="Update All Models" placement="top">
+					<div
+						class="flex max-w-[60%] shrink-0 items-center gap-1 overflow-x-auto scrollbar-none"
+						bind:this={tagsContainerElement}
+						on:wheel={(e) => {
+							if (e.deltaY !== 0) {
+								e.preventDefault();
+								e.currentTarget.scrollLeft += e.deltaY;
+							}
+						}}
+					>
+						<div
+							class="flex w-fit gap-0.5 text-center text-sm rounded-full bg-transparent whitespace-nowrap"
+						>
+							<AdminViewSelector bind:value={viewOption} align="end" />
+
+							{#if (tags ?? []).length > 0}
+								<TagSelector
+									bind:value={selectedTag}
+									align="end"
+									items={tags.map((tag) => {
+										return { value: tag, label: tag };
+									})}
+									onChange={async () => {
+										await init();
+									}}
+								/>
+							{/if}
+						</div>
+
+						<Dropdown align="end">
+							<Tooltip content={$i18n.t('Actions')}>
+								<button
+									class="flex h-8 items-center gap-1.5 rounded-xl bg-transparent px-1.5 text-[0.8125rem] font-normal text-gray-700 transition hover:text-gray-900 dark:text-gray-200 dark:hover:text-gray-100"
+									type="button"
+								>
+									<span>{$i18n.t('Actions')}</span>
+									<ChevronDown className="size-3" strokeWidth="2.5" />
+								</button>
+							</Tooltip>
+
+							<div slot="content">
+								<DropdownMenu className="w-[10.625rem] shadow-sm">
+									{#if $user?.role === 'admin'}
 										<button
-											class="p-2.5 flex gap-2 items-center bg-gray-50 hover:bg-gray-200 text-gray-800 dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-gray-100 rounded-lg transition"
+											class="flex h-[1.6875rem] w-full cursor-pointer select-none items-center gap-2 rounded-xl bg-transparent px-2 text-[0.8125rem] disabled:pointer-events-none disabled:opacity-40 hover:text-gray-900 dark:hover:text-gray-100"
+											type="button"
+											disabled={modelsImportInProgress}
 											on:click={() => {
-												updateModelsHandler();
+												modelsImportInputElement?.click();
 											}}
 										>
-											<svg
-												xmlns="http://www.w3.org/2000/svg"
-												viewBox="0 0 16 16"
-												fill="currentColor"
-												class="w-4 h-4"
-											>
-												<path
-													d="M7 1a.75.75 0 0 1 .75.75V6h-1.5V1.75A.75.75 0 0 1 7 1ZM6.25 6v2.94L5.03 7.72a.75.75 0 0 0-1.06 1.06l2.5 2.5a.75.75 0 0 0 1.06 0l2.5-2.5a.75.75 0 1 0-1.06-1.06L7.75 8.94V6H10a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2.25Z"
-												/>
-												<path
-													d="M4.268 14A2 2 0 0 0 6 15h6a2 2 0 0 0 2-2v-3a2 2 0 0 0-1-1.732V11a3 3 0 0 1-3 3H4.268Z"
-												/>
-											</svg>
+											<DocumentArrowUp className="size-3.5" />
+											<div class="flex items-center">{$i18n.t('Import')}</div>
 										</button>
+
+										<button
+											class="flex h-[1.6875rem] w-full cursor-pointer select-none items-center gap-2 rounded-xl bg-transparent px-2 text-[0.8125rem] hover:text-gray-900 dark:hover:text-gray-100"
+											type="button"
+											on:click={() => {
+												downloadModels(models ?? []);
+											}}
+										>
+											<Download className="size-3.5" />
+											<div class="flex items-center">{$i18n.t('Export')}</div>
+										</button>
+									{/if}
+
+									<button
+										class="flex h-[1.6875rem] w-full cursor-pointer select-none items-center gap-2 rounded-xl bg-transparent px-2 text-[0.8125rem] hover:text-gray-900 dark:hover:text-gray-100"
+										type="button"
+										on:click={() => {
+											showManageModal = true;
+										}}
+									>
+										<Wrench className="size-3.5" />
+										<div class="flex items-center">{$i18n.t('Manage')}</div>
+									</button>
+
+									<button
+										class="flex h-[1.6875rem] w-full cursor-pointer select-none items-center gap-2 rounded-xl bg-transparent px-2 text-[0.8125rem] hover:text-gray-900 dark:hover:text-gray-100"
+										type="button"
+										on:click={() => {
+											showResetModal = true;
+										}}
+									>
+										<GarbageBin className="size-3.5" />
+										<div class="flex items-center">{$i18n.t('Reset')}</div>
+									</button>
+
+									<hr class="mx-1 my-0.5 border-gray-100 dark:border-gray-800" />
+
+									<button
+										class="flex h-[1.6875rem] w-full cursor-pointer select-none items-center gap-2 rounded-xl bg-transparent px-2 text-[0.8125rem] hover:text-gray-900 dark:hover:text-gray-100"
+										type="button"
+										on:click={() => {
+											enableAllHandler();
+										}}
+									>
+										<CheckCircle className="size-3.5" />
+										<div class="flex items-center">{$i18n.t('Enable All')}</div>
+									</button>
+
+									<button
+										class="flex h-[1.6875rem] w-full cursor-pointer select-none items-center gap-2 rounded-xl bg-transparent px-2 text-[0.8125rem] hover:text-gray-900 dark:hover:text-gray-100"
+										type="button"
+										on:click={() => {
+											disableAllHandler();
+										}}
+									>
+										<Minus className="size-3.5" />
+										<div class="flex items-center">{$i18n.t('Disable All')}</div>
+									</button>
+
+									<hr class="mx-1 my-0.5 border-gray-100 dark:border-gray-800" />
+
+									<button
+										class="flex h-[1.6875rem] w-full cursor-pointer select-none items-center gap-2 rounded-xl bg-transparent px-2 text-[0.8125rem] hover:text-gray-900 dark:hover:text-gray-100"
+										type="button"
+										on:click={() => {
+											showAllHandler();
+										}}
+									>
+										<Eye className="size-3.5" />
+										<div class="flex items-center">{$i18n.t('Show All')}</div>
+									</button>
+
+									<button
+										class="flex h-[1.6875rem] w-full cursor-pointer select-none items-center gap-2 rounded-xl bg-transparent px-2 text-[0.8125rem] hover:text-gray-900 dark:hover:text-gray-100"
+										type="button"
+										on:click={() => {
+											hideAllHandler();
+										}}
+									>
+										<EyeSlash className="size-3.5" />
+										<div class="flex items-center">{$i18n.t('Hide All')}</div>
+									</button>
+								</DropdownMenu>
+							</div>
+						</Dropdown>
+					</div>
+				</div>
+
+				<div
+					class="my-0.5 min-h-0 flex-1 space-y-px {filteredModels.length > 0
+						? 'overflow-y-auto scrollbar-hover pr-1.5'
+						: 'overflow-hidden'}"
+					id="model-list"
+					bind:this={modelListElement}
+				>
+					{#if filteredModels.length > 0}
+						{#each filteredModels as model, modelIdx (`${model.id}-${modelIdx}`)}
+							<div
+								class="flex cursor-pointer transition w-full px-2 py-1 rounded-xl hover:bg-gray-50/70 dark:hover:bg-gray-850/50 {model
+									?.meta?.hidden
+									? 'opacity-50 dark:opacity-50'
+									: ''}"
+								id="model-item-{model.id}"
+							>
+								<div class="self-center pr-1 -ml-1 text-gray-400 dark:text-gray-600">
+									<Tooltip
+										content={canReorderModels
+											? $i18n.t('Drag to reorder')
+											: $i18n.t('Clear filters to reorder')}
+									>
+										<EllipsisVertical
+											className="size-4 {canReorderModels
+												? 'cursor-move model-item-handle'
+												: 'opacity-40'}"
+										/>
 									</Tooltip>
 								</div>
-							</div>
-						</div>
 
-						{#if updateModelId}
-							Updating "{updateModelId}" {updateProgress ? `(${updateProgress}%)` : ''}
-						{/if}
-					{/if}
-
-					<div class="space-y-2">
-						<div>
-							<div class=" mb-2 text-sm font-medium">{$i18n.t('Pull a model from Ollama.com')}</div>
-							<div class="flex w-full">
-								<div class="flex-1 mr-2">
-									<input
-										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-none"
-										placeholder={$i18n.t('Enter model tag (e.g. {{modelTag}})', {
-											modelTag: 'mistral:7b'
-										})}
-										bind:value={modelTag}
-									/>
-								</div>
 								<button
-									class="px-2.5 bg-gray-50 hover:bg-gray-200 text-gray-800 dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-gray-100 rounded-lg transition"
-									on:click={() => {
-										pullModelHandler();
-									}}
-									disabled={modelTransferring}
-								>
-									{#if modelTransferring}
-										<div class="self-center">
-											<svg
-												class=" w-4 h-4"
-												viewBox="0 0 24 24"
-												fill="currentColor"
-												xmlns="http://www.w3.org/2000/svg"
-											>
-												<style>
-													.spinner_ajPY {
-														transform-origin: center;
-														animation: spinner_AtaB 0.75s infinite linear;
-													}
-
-													@keyframes spinner_AtaB {
-														100% {
-															transform: rotate(360deg);
-														}
-													}
-												</style>
-												<path
-													d="M12,1A11,11,0,1,0,23,12,11,11,0,0,0,12,1Zm0,19a8,8,0,1,1,8-8A8,8,0,0,1,12,20Z"
-													opacity=".25"
-												/>
-												<path
-													d="M10.14,1.16a11,11,0,0,0-9,8.92A1.59,1.59,0,0,0,2.46,12,1.52,1.52,0,0,0,4.11,10.7a8,8,0,0,1,6.66-6.61A1.42,1.42,0,0,0,12,2.69h0A1.57,1.57,0,0,0,10.14,1.16Z"
-													class="spinner_ajPY"
-												/>
-											</svg>
-										</div>
-									{:else}
-										<svg
-											xmlns="http://www.w3.org/2000/svg"
-											viewBox="0 0 16 16"
-											fill="currentColor"
-											class="w-4 h-4"
-										>
-											<path
-												d="M8.75 2.75a.75.75 0 0 0-1.5 0v5.69L5.03 6.22a.75.75 0 0 0-1.06 1.06l3.5 3.5a.75.75 0 0 0 1.06 0l3.5-3.5a.75.75 0 0 0-1.06-1.06L8.75 8.44V2.75Z"
-											/>
-											<path
-												d="M3.5 9.75a.75.75 0 0 0-1.5 0v1.5A2.75 2.75 0 0 0 4.75 14h6.5A2.75 2.75 0 0 0 14 11.25v-1.5a.75.75 0 0 0-1.5 0v1.5c0 .69-.56 1.25-1.25 1.25h-6.5c-.69 0-1.25-.56-1.25-1.25v-1.5Z"
-											/>
-										</svg>
-									{/if}
-								</button>
-							</div>
-
-							<div class="mt-2 mb-1 text-xs text-gray-400 dark:text-gray-500">
-								{$i18n.t('To access the available model names for downloading,')}
-								<a
-									class=" text-gray-500 dark:text-gray-300 font-medium underline"
-									href="https://ollama.com/library"
-									target="_blank">{$i18n.t('click here.')}</a
-								>
-							</div>
-
-							{#if Object.keys($MODEL_DOWNLOAD_POOL).length > 0}
-								{#each Object.keys($MODEL_DOWNLOAD_POOL) as model}
-									{#if 'pullProgress' in $MODEL_DOWNLOAD_POOL[model]}
-										<div class="flex flex-col">
-											<div class="font-medium mb-1">{model}</div>
-											<div class="">
-												<div class="flex flex-row justify-between space-x-4 pr-2">
-													<div class=" flex-1">
-														<div
-															class="dark:bg-gray-600 bg-gray-500 text-xs font-medium text-gray-100 text-center p-0.5 leading-none rounded-full"
-															style="width: {Math.max(
-																15,
-																$MODEL_DOWNLOAD_POOL[model].pullProgress ?? 0
-															)}%"
-														>
-															{$MODEL_DOWNLOAD_POOL[model].pullProgress ?? 0}%
-														</div>
-													</div>
-
-													<Tooltip content={$i18n.t('Cancel')}>
-														<button
-															class="text-gray-800 dark:text-gray-100"
-															on:click={() => {
-																cancelModelPullHandler(model);
-															}}
-														>
-															<svg
-																class="w-4 h-4 text-gray-800 dark:text-white"
-																aria-hidden="true"
-																xmlns="http://www.w3.org/2000/svg"
-																width="24"
-																height="24"
-																fill="currentColor"
-																viewBox="0 0 24 24"
-															>
-																<path
-																	stroke="currentColor"
-																	stroke-linecap="round"
-																	stroke-linejoin="round"
-																	stroke-width="2"
-																	d="M6 18 17.94 6M18 18 6.06 6"
-																/>
-															</svg>
-														</button>
-													</Tooltip>
-												</div>
-												{#if 'digest' in $MODEL_DOWNLOAD_POOL[model]}
-													<div class="mt-1 text-xs dark:text-gray-500" style="font-size: 0.5rem;">
-														{$MODEL_DOWNLOAD_POOL[model].digest}
-													</div>
-												{/if}
-											</div>
-										</div>
-									{/if}
-								{/each}
-							{/if}
-						</div>
-
-						<div>
-							<div class=" mb-2 text-sm font-medium">{$i18n.t('Delete a model')}</div>
-							<div class="flex w-full">
-								<div class="flex-1 mr-2">
-									<select
-										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-none"
-										bind:value={deleteModelTag}
-										placeholder={$i18n.t('Select a model')}
-									>
-										{#if !deleteModelTag}
-											<option value="" disabled selected>{$i18n.t('Select a model')}</option>
-										{/if}
-										{#each $models.filter((m) => !(m?.preset ?? false) && m.owned_by === 'ollama' && (selectedOllamaUrlIdx === null ? true : (m?.ollama?.urls ?? []).includes(selectedOllamaUrlIdx))) as model}
-											<option value={model.name} class="bg-gray-50 dark:bg-gray-700"
-												>{model.name +
-													' (' +
-													(model.ollama.size / 1024 ** 3).toFixed(1) +
-													' GB)'}</option
-											>
-										{/each}
-									</select>
-								</div>
-								<button
-									class="px-2.5 bg-gray-50 hover:bg-gray-200 text-gray-800 dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-gray-100 rounded-lg transition"
-									on:click={() => {
-										showModelDeleteConfirm = true;
-									}}
-								>
-									<svg
-										xmlns="http://www.w3.org/2000/svg"
-										viewBox="0 0 16 16"
-										fill="currentColor"
-										class="w-4 h-4"
-									>
-										<path
-											fill-rule="evenodd"
-											d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5a.75.75 0 0 1 .786-.711Z"
-											clip-rule="evenodd"
-										/>
-									</svg>
-								</button>
-							</div>
-						</div>
-
-						<div>
-							<div class=" mb-2 text-sm font-medium">{$i18n.t('Create a model')}</div>
-							<div class="flex w-full">
-								<div class="flex-1 mr-2 flex flex-col gap-2">
-									<input
-										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-none"
-										placeholder={$i18n.t('Enter model tag (e.g. {{modelTag}})', {
-											modelTag: 'my-modelfile'
-										})}
-										bind:value={createModelTag}
-										disabled={createModelLoading}
-									/>
-
-									<textarea
-										bind:value={createModelContent}
-										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-100 dark:bg-gray-850 outline-none resize-none scrollbar-hidden"
-										rows="6"
-										placeholder={`TEMPLATE """{{ .System }}\nUSER: {{ .Prompt }}\nASSISTANT: """\nPARAMETER num_ctx 4096\nPARAMETER stop "</s>"\nPARAMETER stop "USER:"\nPARAMETER stop "ASSISTANT:"`}
-										disabled={createModelLoading}
-									/>
-								</div>
-
-								<div class="flex self-start">
-									<button
-										class="px-2.5 py-2.5 bg-gray-50 hover:bg-gray-200 text-gray-800 dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-gray-100 rounded-lg transition disabled:cursor-not-allowed"
-										on:click={() => {
-											createModelHandler();
-										}}
-										disabled={createModelLoading}
-									>
-										<svg
-											xmlns="http://www.w3.org/2000/svg"
-											viewBox="0 0 16 16"
-											fill="currentColor"
-											class="size-4"
-										>
-											<path
-												d="M7.25 10.25a.75.75 0 0 0 1.5 0V4.56l2.22 2.22a.75.75 0 1 0 1.06-1.06l-3.5-3.5a.75.75 0 0 0-1.06 0l-3.5 3.5a.75.75 0 0 0 1.06 1.06l2.22-2.22v5.69Z"
-											/>
-											<path
-												d="M3.5 9.75a.75.75 0 0 0-1.5 0v1.5A2.75 2.75 0 0 0 4.75 14h6.5A2.75 2.75 0 0 0 14 11.25v-1.5a.75.75 0 0 0-1.5 0v1.5c0 .69-.56 1.25-1.25 1.25h-6.5c-.69 0-1.25-.56-1.25-1.25v-1.5Z"
-											/>
-										</svg>
-									</button>
-								</div>
-							</div>
-
-							{#if createModelDigest !== ''}
-								<div class="flex flex-col mt-1">
-									<div class="font-medium mb-1">{createModelTag}</div>
-									<div class="">
-										<div class="flex flex-row justify-between space-x-4 pr-2">
-											<div class=" flex-1">
-												<div
-													class="dark:bg-gray-600 bg-gray-500 text-xs font-medium text-gray-100 text-center p-0.5 leading-none rounded-full"
-													style="width: {Math.max(15, createModelPullProgress ?? 0)}%"
-												>
-													{createModelPullProgress ?? 0}%
-												</div>
-											</div>
-										</div>
-										{#if createModelDigest}
-											<div class="mt-1 text-xs dark:text-gray-500" style="font-size: 0.5rem;">
-												{createModelDigest}
-											</div>
-										{/if}
-									</div>
-								</div>
-							{/if}
-						</div>
-
-						<div class="pt-1">
-							<div class="flex justify-between items-center text-xs">
-								<div class=" text-sm font-medium">{$i18n.t('Experimental')}</div>
-								<button
-									class=" text-xs font-medium text-gray-500"
+									class="flex group/item gap-2.5 w-full min-w-0 flex-1 text-left cursor-pointer"
 									type="button"
 									on:click={() => {
-										showExperimentalOllama = !showExperimentalOllama;
-									}}>{showExperimentalOllama ? $i18n.t('Hide') : $i18n.t('Show')}</button
+										openModelHandler(model);
+									}}
 								>
-							</div>
-						</div>
+									<div class="self-center">
+										<div class="flex rounded-xl">
+											<div
+												class="{(model?.is_active ?? true)
+													? ''
+													: 'opacity-50 dark:opacity-50'} bg-transparent rounded-xl"
+											>
+												<img
+													src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model.id}&lang=${$i18n.language}`}
+													alt="modelfile profile"
+													class=" rounded-xl size-7 object-cover"
+													loading="lazy"
+													decoding="async"
+													on:error={(e) => {
+														// LICENSE covers this Open WebUI fallback logo.
+														// Do not alter, remove, obscure, or replace it except as LICENSE permits:
+														// https://docs.openwebui.com/license.
+														e.target.src = '/favicon.png';
+													}}
+												/>
+											</div>
+										</div>
+									</div>
 
-						{#if showExperimentalOllama}
-							<form
-								on:submit|preventDefault={() => {
-									uploadModelHandler();
-								}}
-							>
-								<div class=" mb-2 flex w-full justify-between">
-									<div class="  text-sm font-medium">{$i18n.t('Upload a GGUF model')}</div>
+									<div
+										class="flex min-w-0 flex-1 pr-1 self-center {(model?.is_active ?? true)
+											? ''
+											: 'text-gray-500'}"
+									>
+										<Tooltip
+											content={marked.parse(
+												!!model?.meta?.description
+													? model?.meta?.description
+													: model?.ollama?.digest
+														? `${model?.ollama?.digest} **(${model?.ollama?.modified_at})**`
+														: model.id
+											)}
+											className="min-w-0 flex-1"
+											placement="top-start"
+										>
+											<div
+												class="flex min-w-0 items-center gap-1.5 text-[0.8125rem] font-normal leading-4"
+											>
+												<span class="min-w-0 truncate">{model.name}</span>
+
+												<span
+													class="shrink-0 text-[0.6875rem] font-normal leading-4 {modelAccessClass(
+														model
+													)}"
+												>
+													{modelAccessLabel(model)}
+												</span>
+
+												{#if defaultModelIdSet.has(model.id)}
+													<span
+														class="shrink-0 text-[0.6875rem] font-normal leading-4 text-gray-500 dark:text-gray-400"
+													>
+														{$i18n.t('Selected')}
+													</span>
+												{/if}
+
+												{#if defaultPinnedModelIdSet.has(model.id)}
+													<span
+														class="shrink-0 text-[0.6875rem] font-normal leading-4 text-gray-500 dark:text-gray-400"
+													>
+														{$i18n.t('Pinned')}
+													</span>
+												{/if}
+											</div>
+										</Tooltip>
+									</div>
+								</button>
+								<div class="flex shrink-0 flex-row gap-0.5 items-center self-center">
+									{#if shiftKey}
+										<Tooltip content={model?.meta?.hidden ? $i18n.t('Show') : $i18n.t('Hide')}>
+											<button
+												class="self-center w-fit text-sm p-1.5 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-xl"
+												type="button"
+												on:click={() => {
+													hideModelHandler(model);
+												}}
+											>
+												{#if model?.meta?.hidden}
+													<EyeSlash />
+												{:else}
+													<Eye />
+												{/if}
+											</button>
+										</Tooltip>
+
+										<Tooltip
+											content={defaultModelIdSet.has(model.id)
+												? $i18n.t('Remove Selected Model')
+												: $i18n.t('Set as Selected Model')}
+										>
+											<button
+												class="self-center w-fit text-sm p-1.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 {defaultModelIdSet.has(
+													model.id
+												)
+													? 'text-gray-900 dark:text-white'
+													: 'text-gray-500 dark:text-gray-400 dark:hover:text-white'}"
+												type="button"
+												aria-label={defaultModelIdSet.has(model.id)
+													? $i18n.t('Remove Selected Model')
+													: $i18n.t('Set as Selected Model')}
+												on:click={() => {
+													toggleDefaultModelHandler(model);
+												}}
+											>
+												<Check className="size-3.5" />
+											</button>
+										</Tooltip>
+
+										<Tooltip
+											content={defaultPinnedModelIdSet.has(model.id)
+												? $i18n.t('Remove Pinned Model')
+												: $i18n.t('Set as Pinned Model')}
+										>
+											<button
+												class="self-center w-fit text-sm p-1.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 {defaultPinnedModelIdSet.has(
+													model.id
+												)
+													? 'text-gray-900 dark:text-white'
+													: 'text-gray-500 dark:text-gray-400 dark:hover:text-white'}"
+												type="button"
+												aria-label={defaultPinnedModelIdSet.has(model.id)
+													? $i18n.t('Remove Pinned Model')
+													: $i18n.t('Set as Pinned Model')}
+												on:click={() => {
+													toggleDefaultPinnedModelHandler(model);
+												}}
+											>
+												{#if defaultPinnedModelIdSet.has(model.id)}
+													<PinSlash className="size-3.5" />
+												{:else}
+													<Pin className="size-3.5" />
+												{/if}
+											</button>
+										</Tooltip>
+
+										<Tooltip
+											content={isPublicModel(model)
+												? $i18n.t('Make Private')
+												: $i18n.t('Make Public')}
+										>
+											<button
+												class="self-center w-fit text-sm p-1.5 rounded-xl text-gray-500 hover:bg-black/5 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-white"
+												type="button"
+												aria-label={isPublicModel(model)
+													? $i18n.t('Make Private')
+													: $i18n.t('Make Public')}
+												on:click={() => {
+													toggleModelPrivacyHandler(model);
+												}}
+											>
+												{#if isPublicModel(model)}
+													<LockClosed className="size-3.5" />
+												{:else}
+													<GlobeAlt className="size-3.5" />
+												{/if}
+											</button>
+										</Tooltip>
+									{/if}
 
 									<button
-										class="p-1 px-3 text-xs flex rounded transition"
-										on:click={() => {
-											if (modelUploadMode === 'file') {
-												modelUploadMode = 'url';
-											} else {
-												modelUploadMode = 'file';
-											}
-										}}
+										class="hidden sm:flex self-center w-fit text-sm p-1.5 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-xl"
 										type="button"
+										aria-label={$i18n.t('Edit')}
+										on:click={() => {
+											openModelHandler(model);
+										}}
 									>
-										{#if modelUploadMode === 'file'}
-											<span class="ml-2 self-center">{$i18n.t('File Mode')}</span>
-										{:else}
-											<span class="ml-2 self-center">{$i18n.t('URL Mode')}</span>
-										{/if}
-									</button>
-								</div>
-
-								<div class="flex w-full mb-1.5">
-									<div class="flex flex-col w-full">
-										{#if modelUploadMode === 'file'}
-											<div
-												class="flex-1 {modelInputFile && modelInputFile.length > 0 ? 'mr-2' : ''}"
-											>
-												<input
-													id="model-upload-input"
-													bind:this={modelUploadInputElement}
-													type="file"
-													bind:files={modelInputFile}
-													on:change={() => {
-														console.log(modelInputFile);
-													}}
-													accept=".gguf,.safetensors"
-													required
-													hidden
-												/>
-
-												<button
-													type="button"
-													class="w-full rounded-lg text-left py-2 px-4 bg-gray-50 dark:text-gray-300 dark:bg-gray-850"
-													on:click={() => {
-														modelUploadInputElement.click();
-													}}
-												>
-													{#if modelInputFile && modelInputFile.length > 0}
-														{modelInputFile[0].name}
-													{:else}
-														{$i18n.t('Click here to select')}
-													{/if}
-												</button>
-											</div>
-										{:else}
-											<div class="flex-1 {modelFileUrl !== '' ? 'mr-2' : ''}">
-												<input
-													class="w-full rounded-lg text-left py-2 px-4 bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-none {modelFileUrl !==
-													''
-														? 'mr-2'
-														: ''}"
-													type="url"
-													required
-													bind:value={modelFileUrl}
-													placeholder={$i18n.t('Type Hugging Face Resolve (Download) URL')}
-												/>
-											</div>
-										{/if}
-									</div>
-
-									{#if (modelUploadMode === 'file' && modelInputFile && modelInputFile.length > 0) || (modelUploadMode === 'url' && modelFileUrl !== '')}
-										<button
-											class="px-2.5 bg-gray-50 hover:bg-gray-200 text-gray-800 dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-gray-100 rounded-lg disabled:cursor-not-allowed transition"
-											type="submit"
-											disabled={modelTransferring}
+										<svg
+											xmlns="http://www.w3.org/2000/svg"
+											fill="none"
+											viewBox="0 0 24 24"
+											stroke-width="1.5"
+											stroke="currentColor"
+											class="size-3.5"
 										>
-											{#if modelTransferring}
-												<div class="self-center">
-													<svg
-														class=" w-4 h-4"
-														viewBox="0 0 24 24"
-														fill="currentColor"
-														xmlns="http://www.w3.org/2000/svg"
-													>
-														<style>
-															.spinner_ajPY {
-																transform-origin: center;
-																animation: spinner_AtaB 0.75s infinite linear;
-															}
-
-															@keyframes spinner_AtaB {
-																100% {
-																	transform: rotate(360deg);
-																}
-															}
-														</style>
-														<path
-															d="M12,1A11,11,0,1,0,23,12,11,11,0,0,0,12,1Zm0,19a8,8,0,1,1,8-8A8,8,0,0,1,12,20Z"
-															opacity=".25"
-														/>
-														<path
-															d="M10.14,1.16a11,11,0,0,0-9,8.92A1.59,1.59,0,0,0,2.46,12,1.52,1.52,0,0,0,4.11,10.7a8,8,0,0,1,6.66-6.61A1.42,1.42,0,0,0,12,2.69h0A1.57,1.57,0,0,0,10.14,1.16Z"
-															class="spinner_ajPY"
-														/>
-													</svg>
-												</div>
-											{:else}
-												<svg
-													xmlns="http://www.w3.org/2000/svg"
-													viewBox="0 0 16 16"
-													fill="currentColor"
-													class="w-4 h-4"
-												>
-													<path
-														d="M7.25 10.25a.75.75 0 0 0 1.5 0V4.56l2.22 2.22a.75.75 0 1 0 1.06-1.06l-3.5-3.5a.75.75 0 0 0-1.06 0l-3.5 3.5a.75.75 0 0 0 1.06 1.06l2.22-2.22v5.69Z"
-													/>
-													<path
-														d="M3.5 9.75a.75.75 0 0 0-1.5 0v1.5A2.75 2.75 0 0 0 4.75 14h6.5A2.75 2.75 0 0 0 14 11.25v-1.5a.75.75 0 0 0-1.5 0v1.5c0 .69-.56 1.25-1.25 1.25h-6.5c-.69 0-1.25-.56-1.25-1.25v-1.5Z"
-													/>
-												</svg>
-											{/if}
-										</button>
-									{/if}
-								</div>
-
-								{#if (modelUploadMode === 'file' && modelInputFile && modelInputFile.length > 0) || (modelUploadMode === 'url' && modelFileUrl !== '')}
-									<div>
-										<div>
-											<div class=" my-2.5 text-sm font-medium">{$i18n.t('Modelfile Content')}</div>
-											<textarea
-												bind:value={modelFileContent}
-												class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-100 dark:bg-gray-850 outline-none resize-none"
-												rows="6"
+											<path
+												stroke-linecap="round"
+												stroke-linejoin="round"
+												d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487Zm0 0L19.5 7.125"
 											/>
-										</div>
-									</div>
-								{/if}
-								<div class=" mt-1 text-xs text-gray-400 dark:text-gray-500">
-									{$i18n.t('To access the GGUF models available for downloading,')}
-									<a
-										class=" text-gray-500 dark:text-gray-300 font-medium underline"
-										href="https://huggingface.co/models?search=gguf"
-										target="_blank">{$i18n.t('click here.')}</a
+										</svg>
+									</button>
+
+									<ModelMenu
+										user={$user}
+										{model}
+										exportHandler={() => {
+											exportModelHandler(model);
+										}}
+										hideHandler={() => {
+											hideModelHandler(model);
+										}}
+										privacyHandler={() => {
+											toggleModelPrivacyHandler(model);
+										}}
+										isDefaultSelected={defaultModelIdSet.has(model.id)}
+										isDefaultPinned={defaultPinnedModelIdSet.has(model.id)}
+										defaultSelectedHandler={() => {
+											toggleDefaultModelHandler(model);
+										}}
+										defaultPinnedHandler={() => {
+											toggleDefaultPinnedModelHandler(model);
+										}}
+										pinModelHandler={() => {
+											pinModelHandler(model.id);
+										}}
+										copyLinkHandler={() => {
+											copyLinkHandler(model);
+										}}
+										cloneHandler={() => {
+											cloneHandler(model);
+										}}
+										onClose={() => {}}
 									>
+										<button
+											class="self-center w-fit text-sm p-1.5 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-xl"
+											type="button"
+										>
+											<EllipsisHorizontal className="size-3.5" />
+										</button>
+									</ModelMenu>
+
+									<div class="ml-1">
+										<Tooltip
+											content={(model?.is_active ?? true)
+												? $i18n.t('Enabled')
+												: $i18n.t('Disabled')}
+										>
+											<Switch
+												bind:state={model.is_active}
+												on:change={async () => {
+													toggleModelHandler(model);
+												}}
+											/>
+										</Tooltip>
+									</div>
 								</div>
+							</div>
+						{/each}
+					{:else}
+						<div class="flex h-full w-full items-center justify-center py-10">
+							<div class="max-w-md text-center">
+								<div class="mb-2 text-xl">😕</div>
+								<div class="mb-1 text-sm text-gray-700 dark:text-gray-300">
+									{$i18n.t('No models found')}
+								</div>
+								<div class=" text-gray-500 text-center text-xs">
+									{$i18n.t('Try adjusting your search or filter to find what you are looking for.')}
+								</div>
+							</div>
+						</div>
+					{/if}
+				</div>
 
-								{#if uploadMessage}
-									<div class="mt-2">
-										<div class=" mb-2 text-xs">{$i18n.t('Upload Progress')}</div>
-
-										<div class="w-full rounded-full dark:bg-gray-800">
-											<div
-												class="dark:bg-gray-600 bg-gray-500 text-xs font-medium text-gray-100 text-center p-0.5 leading-none rounded-full"
-												style="width: 100%"
-											>
-												{uploadMessage}
-											</div>
-										</div>
-										<div class="mt-1 text-xs dark:text-gray-500" style="font-size: 0.5rem;">
-											{modelFileDigest}
-										</div>
-									</div>
-								{:else if uploadProgress !== null}
-									<div class="mt-2">
-										<div class=" mb-2 text-xs">{$i18n.t('Upload Progress')}</div>
-
-										<div class="w-full rounded-full dark:bg-gray-800">
-											<div
-												class="dark:bg-gray-600 bg-gray-500 text-xs font-medium text-gray-100 text-center p-0.5 leading-none rounded-full"
-												style="width: {Math.max(15, uploadProgress ?? 0)}%"
-											>
-												{uploadProgress ?? 0}%
-											</div>
-										</div>
-										<div class="mt-1 text-xs dark:text-gray-500" style="font-size: 0.5rem;">
-											{modelFileDigest}
-										</div>
-									</div>
-								{/if}
-							</form>
+				<div class="flex justify-end pt-6 text-sm font-normal">
+					<button
+						class="flex items-center gap-2 px-3.5 py-1.5 text-sm font-normal bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full disabled:cursor-not-allowed disabled:opacity-40"
+						type="button"
+						disabled={(!modelOrderDirty && !modelDefaultsDirty) ||
+							savingModelOrder ||
+							savingModelsSettings}
+						on:click={async () => {
+							await saveModelsSettings();
+						}}
+					>
+						{$i18n.t('Save')}
+						{#if savingModelOrder || savingModelsSettings}
+							<span class="shrink-0">
+								<Spinner />
+							</span>
 						{/if}
-					</div>
-				</div>
-			{:else if ollamaVersion === false}
-				<div>Ollama Not Detected</div>
-			{:else}
-				<div class="flex h-full justify-center">
-					<div class="my-auto">
-						<Spinner className="size-6" />
-					</div>
-				</div>
-			{/if}
-		{:else if ollamaEnabled === false}
-			<div>{$i18n.t('Ollama API is disabled')}</div>
-		{:else}
-			<div class="flex h-full justify-center">
-				<div class="my-auto">
-					<Spinner className="size-6" />
+					</button>
 				</div>
 			</div>
-		{/if}
+		</div>
+	{:else}
+		<ModelEditor
+			edit
+			model={models.find((m) => m.id === selectedModelId)}
+			preset={false}
+			onSubmit={async (model) => {
+				console.log(model);
+				await upsertModelHandler(model);
+				selectedModelId = null;
+				await init();
+			}}
+			onBack={async () => {
+				selectedModelId = null;
+				await init();
+			}}
+		/>
+	{/if}
+{:else}
+	<div class=" h-full w-full flex justify-center items-center">
+		<Spinner className="size-5" />
 	</div>
-</div>
+{/if}

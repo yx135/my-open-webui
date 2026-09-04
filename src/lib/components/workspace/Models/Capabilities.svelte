@@ -1,43 +1,113 @@
 <script lang="ts">
 	import { getContext } from 'svelte';
+	import type { Writable } from 'svelte/store';
+	import type { i18n as i18nType } from 'i18next';
 	import Checkbox from '$lib/components/common/Checkbox.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import { marked } from 'marked';
 
-	const i18n = getContext('i18n');
+	const i18n: Writable<i18nType> = getContext('i18n');
 
-	const helpText = {
-		vision: $i18n.t('Model accepts image inputs'),
-		usage: $i18n.t(
-			'Sends `stream_options: { include_usage: true }` in the request.\nSupported providers will return token usage information in the response when set.'
-		)
+	const capabilityLabels = {
+		vision: {
+			label: $i18n.t('Vision'),
+			description: $i18n.t('Model accepts image inputs')
+		},
+		file_upload: {
+			label: $i18n.t('File Upload'),
+			description: $i18n.t('Model accepts file inputs')
+		},
+		file_context: {
+			label: $i18n.t('File Context'),
+			description: $i18n.t('Inject file content into conversation context')
+		},
+		web_search: {
+			label: $i18n.t('Web Search'),
+			description: $i18n.t('Model can search the web for information')
+		},
+		image_generation: {
+			label: $i18n.t('Image Generation'),
+			description: $i18n.t('Model can generate images based on text prompts')
+		},
+		code_interpreter: {
+			label: $i18n.t('Code Interpreter'),
+			description: $i18n.t('Model can execute code and perform calculations')
+		},
+		terminal: {
+			label: $i18n.t('Terminal'),
+			description: $i18n.t(
+				'Model can access Open Terminal for command execution and file management'
+			)
+		},
+		usage: {
+			label: $i18n.t('Usage'),
+			description: $i18n.t(
+				'Sends `stream_options: { include_usage: true }` in the request.\nSupported providers will return token usage information in the response when set.'
+			)
+		},
+		citations: {
+			label: $i18n.t('Citations'),
+			description: $i18n.t('Displays citations in the response')
+		},
+		status_updates: {
+			label: $i18n.t('Status Updates'),
+			description: $i18n.t('Displays status updates (e.g., web search progress) in the response')
+		},
+		memory: {
+			label: $i18n.t('Memory'),
+			description: $i18n.t('Inject stored memories into conversation context')
+		},
+		builtin_tools: {
+			label: $i18n.t('Builtin Tools'),
+			description: $i18n.t(
+				'Automatically inject system tools in native function calling mode (e.g., timestamps, memory, chat history, notes, etc.)'
+			)
+		}
 	};
 
-	export let capabilities: {
-		vision?: boolean;
-		usage?: boolean;
-	} = {};
+	type Capability = keyof typeof capabilityLabels;
+
+	export let capabilities: Partial<Record<Capability, boolean>> = {};
+
+	const setCapability = (capability: Capability, checked: boolean) => {
+		capabilities[capability] = checked;
+		capabilities = capabilities;
+	};
+
+	// Hide file_context when file_upload is disabled
+	$: visibleCapabilities = (Object.keys(capabilityLabels) as Capability[]).filter((cap) => {
+		if (cap === 'file_context' && !capabilities.file_upload) {
+			return false;
+		}
+		return true;
+	});
 </script>
 
 <div>
-	<div class="flex w-full justify-between mb-1">
-		<div class=" self-center text-sm font-semibold">{$i18n.t('Capabilities')}</div>
-	</div>
-	<div class="flex flex-col">
-		{#each Object.keys(capabilities) as capability}
-			<div class=" flex items-center gap-2">
+	<div class="mb-1.5 text-xs text-gray-400 dark:text-gray-600">{$i18n.t('Capabilities')}</div>
+	<div class="grid grid-cols-1 gap-x-5 gap-y-1 sm:grid-cols-2 lg:grid-cols-3">
+		{#each visibleCapabilities as capability}
+			<div class="flex min-h-6 items-center gap-2.5">
 				<Checkbox
+					ariaLabel={$i18n.t(capabilityLabels[capability].label)}
 					state={capabilities[capability] ? 'checked' : 'unchecked'}
 					on:change={(e) => {
-						capabilities[capability] = e.detail === 'checked';
+						setCapability(capability, e.detail === 'checked');
 					}}
 				/>
-
-				<div class=" py-0.5 text-sm capitalize">
-					<Tooltip content={marked.parse(helpText[capability])}>
-						{$i18n.t(capability)}
+				<button
+					type="button"
+					class="min-w-0 cursor-pointer text-left text-xs text-gray-600 dark:text-gray-400"
+					on:click={() => setCapability(capability, !capabilities[capability])}
+				>
+					<Tooltip
+						as="span"
+						className="block min-w-0"
+						content={marked.parse(capabilityLabels[capability].description)}
+					>
+						<span class="block truncate">{$i18n.t(capabilityLabels[capability].label)}</span>
 					</Tooltip>
-				</div>
+				</button>
 			</div>
 		{/each}
 	</div>

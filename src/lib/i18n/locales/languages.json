@@ -8,12 +8,32 @@
 		"title": "English (GB)"
 	},
 	{
+		"code": "ar",
+		"title": "Arabic (العربية)"
+	},
+	{
 		"code": "ar-BH",
-		"title": "Arabic (عربي)"
+		"title": "Arabic (Bahrain)"
+	},
+	{
+		"code": "az-AZ",
+		"title": "Azərbaycanca"
+	},
+	{
+		"code": "eu-ES",
+		"title": "Basque (Euskara)"
 	},
 	{
 		"code": "bn-BD",
 		"title": "Bengali (বাংলা)"
+	},
+	{
+		"code": "bs-BA",
+		"title": "Bosanski Latinica"
+	},
+	{
+		"code": "bo-TB",
+		"title": "Tibetan (བོད)"
 	},
 	{
 		"code": "bg-BG",
@@ -28,20 +48,32 @@
 		"title": "Cebuano (Filipino)"
 	},
 	{
-		"code": "de-DE",
-		"title": "German (Deutsch)"
+		"code": "hr-HR",
+		"title": "Croatian (Hrvatski)"
 	},
 	{
-		"code": "es-ES",
-		"title": "Spanish (Español)"
+		"code": "cs-CZ",
+		"title": "Czech (čeština)"
 	},
 	{
-		"code": "fa-IR",
-		"title": "Persian (فارسی)"
+		"code": "da-DK",
+		"title": "Danish (Denmark)"
+	},
+	{
+		"code": "nl-NL",
+		"title": "Dutch (Netherlands)"
+	},
+	{
+		"code": "et-EE",
+		"title": "Estonian (Eesti)"
 	},
 	{
 		"code": "fi-FI",
 		"title": "Finnish (Suomalainen)"
+	},
+	{
+		"code": "fo-FO",
+		"title": "Faroese (Faroe Islands)"
 	},
 	{
 		"code": "fr-CA",
@@ -52,6 +84,22 @@
 		"title": "French (France)"
 	},
 	{
+		"code": "gl-ES",
+		"title": "Galician (Galego)"
+	},
+	{
+		"code": "ka-GE",
+		"title": "Georgian (ქართული)"
+	},
+	{
+		"code": "de-DE",
+		"title": "German (Deutsch)"
+	},
+	{
+		"code": "el-GR",
+		"title": "Greek (Ἑλλάδα)"
+	},
+	{
 		"code": "he-IL",
 		"title": "Hebrew (עברית)"
 	},
@@ -60,12 +108,16 @@
 		"title": "Hindi (हिंदी)"
 	},
 	{
-		"code": "hr-HR",
-		"title": "Croatian (Hrvatski)"
+		"code": "hu-HU",
+		"title": "Hungarian (Magyar)"
 	},
 	{
 		"code": "id-ID",
 		"title": "Indonesian (Bahasa Indonesia)"
+	},
+	{
+		"code": "ie-GA",
+		"title": "Irish (Gaeilge)"
 	},
 	{
 		"code": "it-IT",
@@ -76,8 +128,8 @@
 		"title": "Japanese (日本語)"
 	},
 	{
-		"code": "ka-GE",
-		"title": "Georgian (ქართული)"
+		"code": "kab-DZ",
+		"title": "Kabyle (Taqbaylit)"
 	},
 	{
 		"code": "ko-KR",
@@ -88,6 +140,10 @@
 		"title": "Lithuanian (Lietuvių)"
 	},
 	{
+		"code": "lv-LV",
+		"title": "Latvian (Latviešu)"
+	},
+	{
 		"code": "ms-MY",
 		"title": "Malay (Bahasa Malaysia)"
 	},
@@ -96,12 +152,8 @@
 		"title": "Norwegian Bokmål (Norway)"
 	},
 	{
-		"code": "nl-NL",
-		"title": "Dutch (Netherlands)"
-	},
-	{
-		"code": "pa-IN",
-		"title": "Punjabi (India)"
+		"code": "fa-IR",
+		"title": "Persian (فارسی)"
 	},
 	{
 		"code": "pl-PL",
@@ -116,6 +168,10 @@
 		"title": "Portuguese (Portugal)"
 	},
 	{
+		"code": "pa-IN",
+		"title": "Punjabi (India)"
+	},
+	{
 		"code": "ro-RO",
 		"title": "Romanian (Romania)"
 	},
@@ -124,12 +180,32 @@
 		"title": "Russian (Russia)"
 	},
 	{
+		"code": "sr-RS",
+		"title": "Serbian (Српски)"
+	},
+	{
+		"code": "sk-SK",
+		"title": "Slovak (Slovenčina)"
+	},
+	{
+		"code": "sl-SI",
+		"title": "Slovenian (Slovenščina)"
+	},
+	{
+		"code": "es-ES",
+		"title": "Spanish (Español)"
+	},
+	{
 		"code": "sv-SE",
 		"title": "Swedish (Svenska)"
 	},
 	{
-		"code": "sr-RS",
-		"title": "Serbian (Српски)"
+		"code": "fil-PH",
+		"title": "Tagalog (Filipino)"
+	},
+	{
+		"code": "ta-IN",
+		"title": "தமிழ் (இந்தியா)"
 	},
 	{
 		"code": "th-TH",
@@ -140,12 +216,28 @@
 		"title": "Turkish (Türkçe)"
 	},
 	{
-		"code": "tk-TW",
+		"code": "tk-TM",
 		"title": "Turkmen (Türkmençe)"
 	},
 	{
 		"code": "uk-UA",
 		"title": "Ukrainian (Українська)"
+	},
+	{
+		"code": "ur-PK",
+		"title": "Urdu (اردو)"
+	},
+	{
+		"code": "ug-CN",
+		"title": "Uyghur (ئۇيغۇرچە)"
+	},
+	{
+		"code": "uz-Cyrl-UZ",
+		"title": "Uzbek (Cyrillic)"
+	},
+	{
+		"code": "uz-Latn-UZ",
+		"title": "Uzbek (Latin)"
 	},
 	{
 		"code": "vi-VN",

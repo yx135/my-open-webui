@@ -1,62 +1,96 @@
 <script lang="ts">
 	import { createEventDispatcher, getContext } from 'svelte';
+	import { WEBUI_API_BASE_URL } from '$lib/constants';
+
+	import { formatFileSize } from '$lib/utils';
+	import { settings, showFileNavPath } from '$lib/stores';
+
+	import FileItemModal from './FileItemModal.svelte';
+	import GarbageBin from '../icons/GarbageBin.svelte';
+	import Spinner from './Spinner.svelte';
+	import Tooltip from './Tooltip.svelte';
+	import XMark from '$lib/components/icons/XMark.svelte';
 
 	const i18n = getContext('i18n');
 	const dispatch = createEventDispatcher();
 
-	export let className = 'w-72';
-	export let colorClassName = 'bg-white dark:bg-gray-800';
+	export let className = 'w-60';
+	export let colorClassName =
+		'bg-white dark:bg-gray-850 border border-gray-50/30 dark:border-gray-800/30';
 	export let url: string | null = null;
 
-	export let clickHandler: Function | null = null;
-
 	export let dismissible = false;
-	export let status = 'processed';
+	export let modal = false;
+	export let loading = false;
+
+	export let item = null;
+	export let edit = false;
+	export let small = false;
 
 	export let name: string;
 	export let type: string;
 	export let size: number;
 
-	function formatSize(size) {
-		if (size == null) return 'Unknown size';
-		if (typeof size !== 'number' || size < 0) return 'Invalid size';
-		if (size === 0) return '0 B';
-		const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-		let unitIndex = 0;
+	import DocumentPage from '../icons/DocumentPage.svelte';
+	import Database from '../icons/Database.svelte';
+	import PageEdit from '../icons/PageEdit.svelte';
+	import ChatBubble from '../icons/ChatBubble.svelte';
+	import Folder from '../icons/Folder.svelte';
+	let showModal = false;
 
-		while (size >= 1024 && unitIndex < units.length - 1) {
-			size /= 1024;
-			unitIndex++;
+	const decodeString = (str: string) => {
+		try {
+			return decodeURIComponent(str);
+		} catch (e) {
+			return str;
 		}
-		return `${size.toFixed(1)} ${units[unitIndex]}`;
-	}
+	};
 </script>
 
-<div class="relative group">
-	<button
-		class="h-14 {className} flex items-center space-x-3 {colorClassName} rounded-xl border border-gray-100 dark:border-gray-800 text-left"
-		type="button"
-		on:click={async () => {
-			if (clickHandler === null) {
-				if (url) {
-					if (type === 'file') {
+{#if item}
+	<FileItemModal bind:show={showModal} bind:item {edit} />
+{/if}
+
+<button
+	class="relative group {className} flex items-center {colorClassName} {small
+		? 'h-8 gap-1.5 rounded-xl px-2.5 text-[0.8125rem] leading-5'
+		: 'gap-1 rounded-2xl p-1.5'} text-left"
+	type="button"
+	on:click={async () => {
+		const filesystemPath = item?.type === 'filesystem' ? (item.path ?? item.url ?? item.id) : null;
+
+		if (filesystemPath) {
+			showFileNavPath.set(filesystemPath);
+		} else if (item?.file?.data?.content || item?.type === 'file' || item?.content || modal) {
+			showModal = !showModal;
+		} else {
+			if (url) {
+				if (type === 'file') {
+					if (url.startsWith('http')) {
 						window.open(`${url}/content`, '_blank').focus();
 					} else {
-						window.open(`${url}`, '_blank').focus();
+						window.open(`${WEBUI_API_BASE_URL}/files/${url}/content`, '_blank').focus();
 					}
+				} else {
+					window.open(`${url}`, '_blank').focus();
 				}
-			} else {
-				clickHandler();
 			}
-		}}
-	>
-		<div class="p-4 py-[1.1rem] bg-red-400 text-white rounded-l-xl">
-			{#if status === 'processed'}
+		}
+
+		dispatch('click');
+	}}
+>
+	{#if !small}
+		<div
+			class="size-10 shrink-0 flex justify-center items-center bg-black/20 dark:bg-white/10 text-white rounded-xl"
+		>
+			{#if !loading}
 				<svg
 					xmlns="http://www.w3.org/2000/svg"
 					viewBox="0 0 24 24"
 					fill="currentColor"
-					class=" size-5"
+					aria-hidden="true"
+					class=" size-4.5"
 				>
 					<path
 						fill-rule="evenodd"
@@ -68,87 +102,116 @@
 					/>
 				</svg>
 			{:else}
-				<svg
-					class=" size-5 translate-y-[0.5px]"
-					fill="currentColor"
-					viewBox="0 0 24 24"
-					xmlns="http://www.w3.org/2000/svg"
-					><style>
-						.spinner_qM83 {
-							animation: spinner_8HQG 1.05s infinite;
-						}
-						.spinner_oXPr {
-							animation-delay: 0.1s;
-						}
-						.spinner_ZTLf {
-							animation-delay: 0.2s;
-						}
-						@keyframes spinner_8HQG {
-							0%,
-							57.14% {
-								animation-timing-function: cubic-bezier(0.33, 0.66, 0.66, 1);
-								transform: translate(0);
-							}
-							28.57% {
-								animation-timing-function: cubic-bezier(0.33, 0, 0.66, 0.33);
-								transform: translateY(-6px);
-							}
-							100% {
-								transform: translate(0);
-							}
-						}
-					</style><circle class="spinner_qM83" cx="4" cy="12" r="2.5" /><circle
-						class="spinner_qM83 spinner_oXPr"
-						cx="12"
-						cy="12"
-						r="2.5"
-					/><circle class="spinner_qM83 spinner_ZTLf" cx="20" cy="12" r="2.5" /></svg
-				>
+				<Spinner />
 			{/if}
 		</div>
+	{:else}
+		<div class="shrink-0 text-gray-500 dark:text-gray-400">
+			{#if !loading}
+				<Tooltip
+					content={type === 'collection'
+						? $i18n.t('Collection')
+						: type === 'note'
+							? $i18n.t('Note')
+							: type === 'chat'
+								? $i18n.t('Chat')
+								: type === 'file' || type === 'filesystem'
+									? $i18n.t('File')
+									: $i18n.t('Document')}
+					placement="top"
+				>
+					{#if type === 'collection'}
+						<Database className="size-3.5" />
+					{:else if type === 'note'}
+						<PageEdit className="size-3.5" />
+					{:else if type === 'chat'}
+						<ChatBubble className="size-3.5" />
+					{:else if type === 'folder'}
+						<Folder className="size-3.5" />
+					{:else}
+						<DocumentPage className="size-3.5" />
+					{/if}
+				</Tooltip>
+			{:else}
+				<Spinner className="size-3.5" />
+			{/if}
+		</div>
+	{/if}
 
-		<div class="flex flex-col justify-center -space-y-0.5 pl-1.5 pr-4 w-full">
-			<div class=" dark:text-gray-100 text-sm font-medium line-clamp-1 mb-1">
-				{name}
+	{#if !small}
+		<div class="flex flex-col justify-center -space-y-0.5 px-2.5 w-full">
+			<div class=" dark:text-gray-100 text-sm font-normal line-clamp-1 mb-1">
+				{decodeString(name)}
 			</div>
 
-			<div class=" flex justify-between text-gray-500 text-xs">
-				{#if type === 'file'}
+			<div
+				class=" flex justify-between text-xs line-clamp-1 {($settings?.highContrastMode ?? false)
+					? 'text-gray-800 dark:text-gray-100'
+					: 'text-gray-500'}"
+			>
+				{#if type === 'file' || type === 'filesystem'}
 					{$i18n.t('File')}
+				{:else if type === 'note'}
+					{$i18n.t('Note')}
 				{:else if type === 'doc'}
 					{$i18n.t('Document')}
 				{:else if type === 'collection'}
 					{$i18n.t('Collection')}
 				{:else}
-					<span class=" capitalize">{type}</span>
+					<span class=" capitalize line-clamp-1">{type}</span>
 				{/if}
 				{#if size}
-					<span class="capitalize">{formatSize(size)}</span>
+					<span class="capitalize">{formatFileSize(size)}</span>
 				{/if}
 			</div>
 		</div>
-	</button>
+	{:else}
+		<Tooltip
+			content={decodeString(name)}
+			className="flex min-w-0 flex-1 overflow-hidden"
+			placement="top-start"
+		>
+			<div class="flex min-w-0 flex-1 items-center overflow-hidden">
+				<div class="flex min-w-0 flex-1 items-center justify-between dark:text-gray-100">
+					<div class="min-w-0 flex-1 truncate pr-1 font-normal">{decodeString(name)}</div>
+					{#if size}
+						<div class="max-w-[35%] shrink-0 truncate text-[0.6875rem] capitalize text-gray-500">
+							{formatFileSize(size)}
+						</div>
+					{:else}
+						<div class="max-w-[35%] shrink-0 truncate text-[0.6875rem] capitalize text-gray-500">
+							{type}
+						</div>
+					{/if}
+				</div>
+			</div>
+		</Tooltip>
+	{/if}
 
 	{#if dismissible}
 		<div class=" absolute -top-1 -right-1">
 			<button
-				class=" bg-gray-400 text-white border border-white rounded-full group-hover:visible invisible transition"
+				aria-label={$i18n.t('Remove File')}
+				class=" bg-white text-black border border-gray-50 rounded-full {($settings?.highContrastMode ??
+				false)
+					? ''
+					: 'hover-reveal transition'}"
 				type="button"
-				on:click={() => {
+				on:click|stopPropagation={() => {
 					dispatch('dismiss');
 				}}
 			>
-				<svg
-					xmlns="http://www.w3.org/2000/svg"
-					viewBox="0 0 20 20"
-					fill="currentColor"
-					class="w-4 h-4"
-				>
-					<path
-						d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z"
-					/>
-				</svg>
+				<XMark className={'size-4'} />
 			</button>
+
+			<!-- <button
+				class=" p-1 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-full group-hover:visible invisible transition"
+				type="button"
+				on:click={() => {
+				}}
+			>
+				<GarbageBin />
+			</button> -->
 		</div>
 	{/if}
-</div>
+</button>

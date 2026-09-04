@@ -20,6 +20,9 @@
 		const manifest = extractFrontmatter(data.content);
 		if (compareVersion(manifest?.required_open_webui_version ?? '0.0.0', WEBUI_VERSION)) {
 			console.log('Version is lower than required');
+			// LICENSE covers this Open WebUI wordmark.
+			// Do not alter, remove, obscure, or replace it except as LICENSE permits:
+			// https://docs.openwebui.com/license.
 			toast.error(
 				$i18n.t(
 					'Open WebUI version (v{{OPEN_WEBUI_VERSION}}) is lower than required version (v{{REQUIRED_VERSION}})',
@@ -36,9 +39,10 @@
 			id: data.id,
 			name: data.name,
 			meta: data.meta,
-			content: data.content
+			content: data.content,
+			access_grants: data.access_grants
 		}).catch((error) => {
-			toast.error(error);
+			toast.error(`${error}`);
 			return null;
 		});
 
@@ -55,32 +59,44 @@
 		const id = $page.url.searchParams.get('id');
 
 		if (id) {
-			tool = await getToolById(localStorage.token, id).catch((error) => {
-				toast.error(error);
+			const res = await getToolById(localStorage.token, id).catch((error) => {
+				toast.error(`${error}`);
 				goto('/workspace/tools');
 				return null;
 			});
 
-			console.log(tool);
+			if (res && !res.write_access) {
+				toast.error($i18n.t('You do not have permission to edit this tool'));
+				goto('/workspace/tools');
+				return;
+			}
+
+			if (res) {
+				tool = res;
+				console.log(tool);
+			}
 		}
 	});
 </script>
 
 {#if tool}
-	<ToolkitEditor
-		edit={true}
-		id={tool.id}
-		name={tool.name}
-		meta={tool.meta}
-		content={tool.content}
-		on:save={(e) => {
-			saveHandler(e.detail);
-		}}
-	/>
+	<div class="h-full min-w-0 overflow-x-hidden">
+		<ToolkitEditor
+			edit={true}
+			id={tool.id}
+			name={tool.name}
+			meta={tool.meta}
+			content={tool.content}
+			accessGrants={tool.access_grants ?? []}
+			onSave={(value) => {
+				saveHandler(value);
+			}}
+		/>
+	</div>
 {:else}
 	<div class="flex items-center justify-center h-full">
 		<div class=" pb-16">
-			<Spinner />
+			<Spinner className="size-5" />
 		</div>
 	</div>
 {/if}
